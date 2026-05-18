@@ -71,3 +71,33 @@ Las demás variables tienen valores por defecto funcionales para desarrollo loca
 - [Webhooks](docs/webhooks.md)
 - [Arquitectura multi-tenant](docs/architecture.md)
 - [Integración con el bot](docs/integration.md)
+
+## Integraciones externas (UX en Instancias)
+
+Cada instancia ahora muestra una seccion `Integration` con:
+- `Webhook URL`
+- `API Base URL`
+- endpoints utiles (`messages`, `events`)
+- estado de API key por instancia
+- botones `Copy` y snippets rapidos (`curl` y `fetch`)
+
+### Como se generan las URLs
+
+Orden de prioridad para construir URLs visibles en frontend:
+1. `Public Base URL` guardada en Settings.
+2. `VITE_PUBLIC_BASE_URL` (si existe en build del frontend).
+3. `Gateway URL` configurada en Settings.
+
+Se normalizan quitando slash final para evitar rutas inconsistentes.
+
+### PUBLIC_BASE_URL (backend)
+
+Se agrega `PUBLIC_BASE_URL` en `config/.env` y en Docker Compose para dejar explicita la URL publica real del gateway.
+Esta variable es de configuracion operativa para evitar usar `localhost` o hosts internos en integraciones.
+
+### Uso desde bots externos
+
+Para enviar mensajes desde un bot externo:
+1. Copiar `API Base URL` y `Unified Messages endpoint` desde la card de la instancia.
+2. Copiar `Bearer token` de la instancia (reveal + copy).
+3. Enviar `Authorization: Bearer <token>` al endpoint recomendado.

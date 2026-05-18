@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     # Gateway
     gateway_api_key: str
     gateway_port: int = 9000
+    public_base_url: str = ""
     log_level: str = "info"
     debug: bool = False
 
@@ -37,6 +38,9 @@ class Settings(BaseSettings):
     media_cache_ttl_seconds: int = 3600
     media_cache_max_files: int = 500
     media_download_timeout: int = 30
+    instance_api_keys_path: str = "/tmp/botly_instance_api_keys.json"
+    instance_webhooks_path: str = "/tmp/botly_instance_webhooks.json"
+    instance_webhook_timeout: int = 8
 
     model_config = SettingsConfigDict(
         # En Docker las variables llegan por environment: en el compose.

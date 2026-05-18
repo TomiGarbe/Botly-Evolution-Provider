@@ -39,6 +39,7 @@ TECHNICAL_EVENTS = {
     "CALL",
     "CHATS_UPDATE",
     "CONTACTS_UPDATE",
+    "CONNECTION_UPDATE",
 }
 
 _settings = get_settings()
@@ -60,6 +61,25 @@ def _first(value: Any, *paths: tuple[str, ...]) -> Any:
         if ok and cur is not None:
             return cur
     return None
+
+
+def _canonical_event_name(raw_event: Any) -> str:
+    event = str(raw_event or "UNKNOWN").strip()
+    token = event.lower().replace("_", ".").replace("-", ".")
+    token = ".".join(part for part in token.split(".") if part)
+    aliases = {
+        "messages.upsert": "MESSAGES_UPSERT",
+        "messages.update": "MESSAGES_UPDATE",
+        "messages.delete": "MESSAGES_DELETE",
+        "send.message": "SEND_MESSAGE",
+        "connection.update": "CONNECTION_UPDATE",
+        "presence.update": "PRESENCE_UPDATE",
+        "presence": "PRESENCE",
+        "call": "CALL",
+        "chats.update": "CHATS_UPDATE",
+        "contacts.update": "CONTACTS_UPDATE",
+    }
+    return aliases.get(token, event.upper())
 
 
 def _guess_kind(message: dict[str, Any], message_type: str) -> str:
@@ -111,12 +131,14 @@ def _extract_media(message: dict[str, Any], kind: str) -> dict[str, Any] | None:
 
 
 def normalize_webhook(payload: dict[str, Any]) -> dict[str, Any]:
-    event = str(payload.get("event", "UNKNOWN"))
+    source_event = str(payload.get("event", "UNKNOWN"))
+    event = _canonical_event_name(source_event)
     now_ms = int(time.time() * 1000)
 
     base = {
         "id": str(uuid.uuid4())[:16],
         "event": event,
+        "sourceEvent": source_event,
         "instance": payload.get("instance"),
         "timestamp": now_ms,
     }
@@ -135,21 +157,26 @@ def normalize_webhook(payload: dict[str, Any]) -> dict[str, Any]:
             return {**base, "layer": "technical", "reason": "status_missing"}
 
         sender = str(_first(payload, ("data", "key", "remoteJid")) or "")
+        from_me = bool(_first(payload, ("data", "key", "fromMe")))
         return {
             **base,
             "layer": "business",
             "direction": "system",
             "type": "delivery",
             "messageType": "delivery",
-            "sender": sender,
-            "recipient": payload.get("instance"),
+            "sender": payload.get("instance") if from_me else sender,
+            "recipient": sender if from_me else payload.get("instance"),
             "content": status_value,
             "text": status_value,
             "status": status_value,
+            "fromMe": from_me,
+            "fromBot": False,
+            "forwarding": {"status": "n/a"},
+            "error": None,
             "message": {
                 "id": _first(payload, ("data", "key", "id")),
                 "from": _first(payload, ("data", "key", "remoteJid")),
-                "fromMe": _first(payload, ("data", "key", "fromMe")),
+                "fromMe": from_me,
                 "kind": "delivery",
                 "text": status_value,
             },
@@ -157,7 +184,9 @@ def normalize_webhook(payload: dict[str, Any]) -> dict[str, Any]:
             "raw": payload,
         }
 
-    if event != "MESSAGES_UPSERT":
+    # Evolution/Baileys emite mensajes reales principalmente via messages.upsert.
+    # Nunca debe clasificarse como técnico porque es el evento de negocio base del chat.
+    if event not in {"MESSAGES_UPSERT", "SEND_MESSAGE"}:
         return {**base, "layer": "technical", "reason": "non_business_event"}
 
     data = payload.get("data") or {}
@@ -180,21 +209,27 @@ def normalize_webhook(payload: dict[str, Any]) -> dict[str, Any]:
         ("videoMessage", "caption"),
     )
 
+    from_me = bool(_first(data, ("key", "fromMe")))
+    remote_jid = _first(data, ("key", "remoteJid"))
     normalized = {
         **base,
         "layer": "business",
-        "direction": "inbound" if not bool(_first(data, ("key", "fromMe"))) else "outbound",
+        "direction": "inbound" if not from_me else "outbound",
         "type": "message",
         "messageType": kind,
-        "sender": _first(data, ("key", "remoteJid")),
-        "recipient": payload.get("instance"),
+        "sender": payload.get("instance") if from_me else remote_jid,
+        "recipient": remote_jid if from_me else payload.get("instance"),
         "content": text,
         "text": text,
         "status": "received",
+        "fromMe": from_me,
+        "fromBot": False,
+        "forwarding": {"status": "pending"},
+        "error": None,
         "message": {
             "id": _first(data, ("key", "id")),
-            "from": _first(data, ("key", "remoteJid")),
-            "fromMe": bool(_first(data, ("key", "fromMe"))),
+            "from": remote_jid,
+            "fromMe": from_me,
             "participant": _first(data, ("key", "participant")),
             "pushName": data.get("pushName"),
             "messageType": message_type,

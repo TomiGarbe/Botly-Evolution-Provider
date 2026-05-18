@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
@@ -18,15 +18,30 @@ class SendTextRequest(BaseModel):
 class SendMediaRequest(BaseModel):
     number: str
     media_url: str
-    mediatype: Literal["image", "video", "audio", "document"]
+    mediatype: Literal["image", "video", "audio", "document", "pdf", "file"]
+    mimetype: str
+    file_name: str
     caption: str = ""
 
 
 class SendUploadedMediaRequest(BaseModel):
     number: str
     file_id: str
-    mediatype: Literal["image", "video", "audio", "document"]
+    mediatype: Literal["image", "video", "audio", "document", "pdf", "file"]
     caption: str = ""
+
+
+UnifiedMessageType = Literal["text", "image", "video", "audio", "document", "file", "pdf"]
+
+
+class SendMessageRequest(BaseModel):
+    number: str = Field(..., min_length=5)
+    type: UnifiedMessageType
+    text: str | None = Field(default=None, max_length=4096)
+    caption: str | None = Field(default=None, max_length=4096)
+    mediaUrl: str | None = None
+    base64: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ButtonItem(BaseModel):
@@ -64,3 +79,18 @@ class SendListRequest(BaseModel):
 
 class CheckNumbersRequest(BaseModel):
     numbers: list[str]
+
+
+WebhookAuthType = Literal["NONE", "BEARER", "API_KEY", "BASIC", "CUSTOM_HEADERS"]
+
+
+class WebhookConfigRequest(BaseModel):
+    url: str = Field(..., min_length=8, max_length=2048)
+    enabled: bool = True
+    authType: WebhookAuthType = "NONE"
+    authConfig: dict[str, str] = Field(default_factory=dict)
+    customHeaders: dict[str, str] = Field(default_factory=dict)
+
+
+class WebhookEnabledRequest(BaseModel):
+    enabled: bool

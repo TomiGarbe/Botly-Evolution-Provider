@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import re
 import random
 from dataclasses import dataclass
 from typing import Any
@@ -11,6 +13,8 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+_DATA_URI_RE = re.compile(r"^data:[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+-]*/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+-]*;base64,")
+_HTTP_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 
 
 @dataclass
@@ -119,6 +123,13 @@ async def _request(method: str, path: str, *, retries: int = 1, **kwargs) -> Any
             response = exc.response
             message = _extract_error_message(response)
             retryable = response.status_code >= 500
+            logger.info(
+                "evolution_response",
+                method=method,
+                path=path,
+                status=response.status_code,
+                body=response.text,
+            )
             logger.warning(
                 "evolution_request_http_error",
                 method=method,
@@ -219,16 +230,97 @@ async def send_text(instance_name: str, number: str, text: str) -> dict:
 async def send_media(
     instance_name: str,
     number: str,
-    media_url: str,
+    media_payload: str,
     mediatype: str,
+    mimetype: str,
+    file_name: str,
     caption: str = "",
 ) -> dict:
-    return await _request(
-        "POST",
-        f"/message/sendMedia/{instance_name}",
-        json={"number": number, "mediatype": mediatype, "media": media_url, "caption": caption},
-        retries=0,
-    )
+    raw_media = (media_payload or "").strip()
+    if not raw_media:
+        raise EvolutionError(message="Payload media invalido: contenido vacio", status_code=400, retryable=False)
+
+    if _HTTP_URL_RE.match(raw_media):
+        payload_real = {"number": number, "mediatype": mediatype, "media": raw_media}
+        if file_name:
+            payload_real["fileName"] = file_name
+        if caption:
+            payload_real["caption"] = caption
+        if mimetype:
+            payload_real["mimetype"] = mimetype
+        return await _request("POST", f"/message/sendMedia/{instance_name}", json=payload_real, retries=0)
+
+    media_prefix_ok = bool(_DATA_URI_RE.match(raw_media))
+    media_b64 = raw_media.split(",", 1)[1] if media_prefix_ok else raw_media
+    try:
+        base64.b64decode(media_b64, validate=True)
+        media_b64_ok = True
+    except Exception:
+        media_b64_ok = False
+
+    if not media_b64_ok:
+        raise EvolutionError(
+            message="Payload media invalido: se esperaba base64 valido (raw o data URI)",
+            status_code=400,
+            detail={"media_prefix_ok": media_prefix_ok, "media_b64_ok": media_b64_ok},
+            retryable=False,
+        )
+
+    payload_b = {"number": number, "mediatype": mediatype, "media": media_b64}
+    if file_name:
+        payload_b["fileName"] = file_name
+    attempts: list[dict[str, Any]] = []
+
+    # Fase A: data URI (si estaba presente originalmente)
+    if media_prefix_ok:
+        payload_a = dict(payload_b)
+        payload_a["media"] = raw_media
+        try:
+            result = await _request("POST", f"/message/sendMedia/{instance_name}", json=payload_a, retries=0)
+            logger.info(
+                "evolution_send_media_ab",
+                endpoint=f"/message/sendMedia/{instance_name}",
+                test="A_data_uri",
+                status=201,
+                accepted_format="data_uri",
+            )
+            return result
+        except EvolutionError as exc:
+            attempts.append({"test": "A_data_uri", "status": exc.status_code, "error": str(exc)})
+            logger.warning(
+                "evolution_send_media_ab",
+                endpoint=f"/message/sendMedia/{instance_name}",
+                test="A_data_uri",
+                status=exc.status_code,
+                error=str(exc),
+            )
+
+    # Fase B: base64 raw (fallback y formato preferido)
+    try:
+        result = await _request("POST", f"/message/sendMedia/{instance_name}", json=payload_b, retries=0)
+        logger.info(
+            "evolution_send_media_ab",
+            endpoint=f"/message/sendMedia/{instance_name}",
+            test="B_raw_base64",
+            status=201,
+            accepted_format="raw_base64",
+        )
+        return result
+    except EvolutionError as exc:
+        attempts.append({"test": "B_raw_base64", "status": exc.status_code, "error": str(exc)})
+        logger.warning(
+            "evolution_send_media_ab",
+            endpoint=f"/message/sendMedia/{instance_name}",
+            test="B_raw_base64",
+            status=exc.status_code,
+            error=str(exc),
+        )
+        raise EvolutionError(
+            message=f"Evolution rechazo media en A/B: {attempts}",
+            status_code=exc.status_code,
+            detail={"attempts": attempts},
+            retryable=exc.retryable,
+        ) from exc
 
 
 async def send_buttons(instance_name: str, payload: dict) -> dict:

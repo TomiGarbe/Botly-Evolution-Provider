@@ -13,6 +13,7 @@ type TestStatus = 'idle' | 'loading' | 'ok' | 'error'
 
 export default function SettingsModal({ config, onClose, onChange }: Props) {
   const [url,    setUrl]    = useState(config.url)
+  const [publicBaseUrl, setPublicBaseUrl] = useState(config.publicBaseUrl || config.url)
   const [apiKey, setApiKey] = useState(config.apiKey)
   const [showKey, setShowKey] = useState(false)
   const [test, setTest]     = useState<TestStatus>('idle')
@@ -27,7 +28,7 @@ export default function SettingsModal({ config, onClose, onChange }: Props) {
   const handleTest = async () => {
     setTest('loading')
     try {
-      await api.health({ url, apiKey })
+      await api.health({ url, apiKey, publicBaseUrl: publicBaseUrl || url })
       setTest('ok')
       setTestMsg('Gateway responde correctamente')
     } catch (e) {
@@ -37,7 +38,9 @@ export default function SettingsModal({ config, onClose, onChange }: Props) {
   }
 
   const handleSave = () => {
-    const cfg: GatewayConfig = { url: url.replace(/\/$/, ''), apiKey }
+    const cleanUrl = url.replace(/\/$/, '')
+    const cleanPublicBaseUrl = publicBaseUrl.trim().replace(/\/$/, '') || cleanUrl
+    const cfg: GatewayConfig = { url: cleanUrl, apiKey, publicBaseUrl: cleanPublicBaseUrl }
     saveConfig(cfg)
     onChange(cfg)
     onClose()
@@ -69,6 +72,19 @@ export default function SettingsModal({ config, onClose, onChange }: Props) {
             />
             <p className="text-xs text-zinc-600">
               En producción: URL de Azure Container Apps / Railway / Render
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs font-medium text-zinc-400">Public Base URL</label>
+            <input
+              value={publicBaseUrl}
+              onChange={e => setPublicBaseUrl(e.target.value)}
+              placeholder="https://gateway.mi-dominio.com"
+              className="bg-zinc-800 border border-zinc-700 focus:border-blue-500 focus:outline-none rounded-lg px-3 py-2.5 text-sm font-mono placeholder:text-zinc-600 transition-colors"
+            />
+            <p className="text-xs text-zinc-600">
+              URL p&uacute;blica real para tus bots/integraciones. Si queda vac&iacute;a, usa Gateway URL.
             </p>
           </div>
 

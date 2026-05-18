@@ -7,6 +7,8 @@ import QRModal from './components/QRModal'
 import CreateModal from './components/CreateModal'
 import SettingsModal from './components/SettingsModal'
 import MediaLab from './components/MediaLab'
+import InstanceApiKeyModal from './components/InstanceApiKeyModal'
+import WebhooksManager from './components/WebhooksManager'
 import { api, ApiError } from './lib/api'
 import { loadConfig, type GatewayConfig } from './lib/config'
 import type { Toast } from './types'
@@ -60,7 +62,8 @@ export default function App() {
   const [qrTarget, setQrTarget] = useState<string | null>(null)
   const [showCreate, setShowCreate] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
-  const [view, setView] = useState<'instances' | 'messages'>('instances')
+  const [apiKeyTarget, setApiKeyTarget] = useState<string | null>(null)
+  const [view, setView] = useState<'instances' | 'messages' | 'webhooks'>('instances')
 
   useEffect(() => {
     if (!config.apiKey) setShowSettings(true)
@@ -76,7 +79,7 @@ export default function App() {
     setToasts(ts => ts.filter(t => t.id !== id))
   }, [])
 
-  const { data: instances, isLoading, isValidating, mutate } = useSWR(
+  const { data: instances, isLoading, isValidating, mutate, error: instancesError } = useSWR(
     config.apiKey ? 'instances' : null,
     () => api.instances.list(config),
     {
@@ -133,7 +136,7 @@ export default function App() {
       <div className="flex-1 flex flex-col min-w-0">
         <header className="flex items-center justify-between px-8 h-14 border-b border-zinc-800 shrink-0">
           <div>
-            <h1 className="font-semibold text-sm">{view === 'instances' ? 'Instancias' : 'Mensajes'}</h1>
+            <h1 className="font-semibold text-sm">{view === 'instances' ? 'Instancias' : view === 'messages' ? 'Mensajes' : 'Webhooks'}</h1>
             {!isLoading && view === 'instances' && (
               <p className="text-xs text-zinc-500 mt-0.5">
                 {list.length} {list.length === 1 ? 'instancia' : 'instancias'} totales
@@ -165,7 +168,15 @@ export default function App() {
 
         <main className="flex-1 px-8 py-6">
           {view === 'messages' ? (
-            <MediaLab config={config} onToast={addToast} />
+            <MediaLab
+              config={config}
+              instances={list}
+              instancesLoading={isLoading}
+              instancesError={instancesError instanceof Error ? instancesError.message : undefined}
+              onToast={addToast}
+            />
+          ) : view === 'webhooks' ? (
+            <WebhooksManager config={config} instances={list} onToast={addToast} />
           ) : isLoading ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
               {[...Array(3)].map((_, i) => (
@@ -190,9 +201,12 @@ export default function App() {
                 <InstanceCard
                   key={inst.id}
                   instance={inst}
+                  config={config}
+                  onToast={addToast}
                   onQR={setQrTarget}
                   onLogout={handleLogout}
                   onDelete={handleDelete}
+                  onApiKey={setApiKeyTarget}
                 />
               ))}
             </div>
@@ -219,6 +233,14 @@ export default function App() {
           config={config}
           onClose={() => setShowSettings(false)}
           onChange={setConfig}
+        />
+      )}
+      {apiKeyTarget && (
+        <InstanceApiKeyModal
+          config={config}
+          instanceName={apiKeyTarget}
+          onClose={() => setApiKeyTarget(null)}
+          onToast={addToast}
         />
       )}
 

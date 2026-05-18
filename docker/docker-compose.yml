@@ -116,6 +116,7 @@ services:
       - ../config/.env
     environment:
       GATEWAY_API_KEY: ${GATEWAY_API_KEY}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       EVOLUTION_URL: http://evolution:8080
       EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
       BOT_WEBHOOK_URL: ${BOT_WEBHOOK_URL:-}

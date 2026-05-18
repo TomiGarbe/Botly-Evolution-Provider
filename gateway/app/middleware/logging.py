@@ -14,7 +14,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """Loguea cada request con tenant/instancia, duración y status code."""
 
     async def dispatch(self, request: Request, call_next):
-        if request.url.path in {"/health", "/ready"}:
+        if request.url.path in {"/health", "/ready", "/webhooks/events"}:
             return await call_next(request)
 
         request_id = str(uuid.uuid4())[:8]
@@ -24,6 +24,8 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         path_parts = request.url.path.strip("/").split("/")
         instance_name = None
         if len(path_parts) >= 2 and path_parts[0] == "instances":
+            instance_name = path_parts[1]
+        elif len(path_parts) >= 2 and path_parts[0] == "messages":
             instance_name = path_parts[1]
 
         structlog.contextvars.clear_contextvars()

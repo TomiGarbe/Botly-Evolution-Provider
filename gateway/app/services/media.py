@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import os
 import time
 import uuid
+from io import StringIO
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -84,6 +86,35 @@ def get_uploaded_file(file_id: str) -> dict[str, str | int] | None:
         _uploaded_files.pop(file_id, None)
         return None
     return file_data
+
+
+def consume_uploaded_file(file_id: str) -> bool:
+    file_data = _uploaded_files.pop(file_id, None)
+    if not file_data:
+        return False
+    try:
+        Path(str(file_data["path"])).unlink(missing_ok=True)
+    except Exception as exc:
+        logger.warning("uploaded_file_cleanup_failed", file_id=file_id, error=str(exc))
+        return False
+    return True
+
+
+def file_to_base64(path: Path, max_bytes: int) -> tuple[str, int]:
+    file_size = path.stat().st_size
+    if file_size <= 0:
+        raise ValueError("Archivo vacio")
+    if file_size > max_bytes:
+        raise ValueError(f"Archivo excede limite ({max_bytes} bytes)")
+
+    encoded = StringIO()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(57 * 1024)
+            if not chunk:
+                break
+            encoded.write(base64.b64encode(chunk).decode("ascii"))
+    return encoded.getvalue(), file_size
 
 
 async def stream_from_url(url: str, *, use_cache: bool = True) -> tuple[AsyncIterator[bytes], dict[str, str]]:

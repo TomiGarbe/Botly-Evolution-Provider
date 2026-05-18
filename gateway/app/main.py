@@ -13,7 +13,7 @@ from app.core.config import get_settings
 from app.core.logging import setup_logging, get_logger
 from app.middleware.auth import AuthMiddleware
 from app.middleware.logging import RequestLoggingMiddleware
-from app.routers import instances, messages, webhooks, media
+from app.routers import instances, messages, webhooks, media, instance_webhooks
 from app.services import evolution
 from app.services.instances_contract import normalize_instance_list
 
@@ -88,6 +88,7 @@ app.include_router(instances.router)
 app.include_router(messages.router)
 app.include_router(webhooks.router)
 app.include_router(media.router)
+app.include_router(instance_webhooks.router)
 
 
 @app.get("/health", tags=["system"])

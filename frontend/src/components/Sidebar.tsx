@@ -2,14 +2,14 @@ import { LayoutGrid, MessageSquare, Webhook, Settings, Zap } from 'lucide-react'
 
 interface Props {
   onOpenSettings: () => void
-  view: 'instances' | 'messages'
-  onChangeView: (view: 'instances' | 'messages') => void
+  view: 'instances' | 'messages' | 'webhooks'
+  onChangeView: (view: 'instances' | 'messages' | 'webhooks') => void
 }
 
 const navItems = [
   { icon: LayoutGrid, label: 'Instancias', view: 'instances' as const },
   { icon: MessageSquare, label: 'Mensajes', view: 'messages' as const },
-  { icon: Webhook, label: 'Webhooks', soon: true },
+  { icon: Webhook, label: 'Webhooks', view: 'webhooks' as const },
 ]
 
 export default function Sidebar({ onOpenSettings, view, onChangeView }: Props) {
@@ -30,25 +30,20 @@ export default function Sidebar({ onOpenSettings, view, onChangeView }: Props) {
         <p className="px-2 mb-2 text-xs font-medium text-zinc-600 uppercase tracking-wider">
           WhatsApp
         </p>
-        {navItems.map(({ icon: Icon, label, view: itemView, soon }) => (
+        {navItems.map(({ icon: Icon, label, view: itemView }) => (
           <button
             key={label}
-            disabled={soon}
+            disabled={false}
             onClick={() => itemView && onChangeView(itemView)}
             className={`
               w-full flex items-center gap-2.5 px-2 py-2 rounded-md text-sm transition-colors
               ${view === itemView
                 ? 'bg-zinc-800 text-zinc-50 font-medium'
-                : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50 disabled:opacity-40 disabled:cursor-not-allowed'}
+                : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50'}
             `}
           >
             <Icon size={15} />
             <span className="flex-1 text-left">{label}</span>
-            {soon && (
-              <span className="text-xs bg-zinc-800 text-zinc-500 px-1.5 py-0.5 rounded font-mono">
-                soon
-              </span>
-            )}
           </button>
         ))}
       </nav>

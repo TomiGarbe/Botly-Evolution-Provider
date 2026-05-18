@@ -73,15 +73,15 @@ async def list_instances() -> list[dict]:
 
 async def send_text(instance_name: str, number: str, text: str) -> dict:
     return await _post(
-        f"/instances/{instance_name}/messages/text",
-        {"number": number, "text": text},
+        f"/messages/{instance_name}",
+        {"number": number, "type": "text", "text": text},
     )
 
 
 async def send_image(instance_name: str, number: str, url: str, caption: str = "") -> dict:
     return await _post(
-        f"/instances/{instance_name}/messages/media",
-        {"number": number, "media_url": url, "mediatype": "image", "caption": caption},
+        f"/messages/{instance_name}",
+        {"number": number, "type": "image", "mediaUrl": url, "caption": caption},
     )
 
 

@@ -11,6 +11,16 @@ export interface Instance {
   createdAt?: string
 }
 
+export interface InstanceApiKey {
+  instanceId: string
+  createdAt?: string | null
+  lastUsedAt?: string | null
+  enabled: boolean
+  hasApiKey: boolean
+  maskedApiKey?: string | null
+  apiKey?: string | null
+}
+
 export interface InstanceState {
   id: string
   name: string
@@ -54,20 +64,34 @@ export interface PipelineEvent {
   text?: string
   content?: string
   status?: string
+  fromMe?: boolean
+  fromBot?: boolean
+  forwarding?: {
+    status?: string
+    attempt?: number
+  } | null
+  error?: {
+    type?: string
+    message?: string
+  } | null
   message?: {
     id?: string
     from?: string
+    fromMe?: boolean
     kind?: string
     text?: string
   }
   media?: {
     id: string
+    kind?: string
     mimeType?: string
     fileName?: string
     fileSize?: number
     duration?: number
     caption?: string
     isVoiceNote?: boolean
+    url?: string
+    directPath?: string
   } | null
   meta?: {
     requestId?: string
@@ -81,4 +105,21 @@ export interface PipelineEvent {
     messageId?: string
   }
   details?: Record<string, unknown>
+}
+
+export type WebhookAuthType = 'NONE' | 'BEARER' | 'API_KEY' | 'BASIC' | 'CUSTOM_HEADERS'
+
+export interface InstanceWebhook {
+  id: string
+  instanceId: string
+  url: string
+  enabled: boolean
+  authType: WebhookAuthType
+  authConfig: Record<string, string>
+  customHeaders: Record<string, string>
+  createdAt?: string | null
+  updatedAt?: string | null
+  lastUsedAt?: string | null
+  lastStatus?: string | null
+  lastError?: string | null
 }
