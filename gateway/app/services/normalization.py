@@ -48,6 +48,18 @@ _operational_events: deque[dict[str, Any]] = deque(maxlen=_settings.webhook_even
 _business_events: deque[dict[str, Any]] = deque(maxlen=_settings.webhook_event_retention)
 _media_index: dict[str, dict[str, Any]] = {}
 
+STATUS_ALIASES = {
+    "pending": "sent",
+    "server_ack": "sent",
+    "sent": "sent",
+    "delivery_ack": "delivered",
+    "delivered": "delivered",
+    "read": "read",
+    "read_ack": "read",
+    "played": "played",
+    "playedback": "played",
+}
+
 
 def _first(value: Any, *paths: tuple[str, ...]) -> Any:
     for path in paths:
@@ -99,6 +111,96 @@ def _guess_kind(message: dict[str, Any], message_type: str) -> str:
     return "unknown"
 
 
+def _normalize_status(raw_status: Any) -> str | None:
+    value = str(raw_status or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not value:
+        return None
+    return STATUS_ALIASES.get(value)
+
+
+def _ensure_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_dict_items(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _normalize_message_update(payload: dict[str, Any], base: dict[str, Any]) -> dict[str, Any]:
+    data_items = _as_dict_items(payload.get("data"))
+    if not data_items:
+        data_items = [_ensure_dict(payload.get("data"))]
+
+    chosen: dict[str, Any] | None = None
+    chosen_status: str | None = None
+    for item in data_items:
+        candidate = _normalize_status(
+            _first(item, ("status",))
+            or _first(item, ("message", "status"))
+            or _first(item, ("update", "status"))
+            or _first(item, ("messageUpdate", "status"))
+        )
+        if candidate:
+            chosen = item
+            chosen_status = candidate
+
+    if not chosen:
+        chosen = data_items[-1] if data_items else {}
+
+    key = _ensure_dict(chosen.get("key"))
+    message_id = str(key.get("id") or _first(chosen, ("message", "key", "id")) or "")
+    remote_jid = str(key.get("remoteJid") or _first(chosen, ("message", "key", "remoteJid")) or "")
+    from_me = bool(key.get("fromMe"))
+
+    return {
+        **base,
+        "layer": "business",
+        "direction": "system",
+        "type": "event",
+        "subtype": "message_status",
+        "originalType": "messages.update",
+        "content": {"text": chosen_status or "[Unknown message status update]"},
+        "media": None,
+        "metadata": {
+            "status": chosen_status or "unknown",
+            "messageId": message_id or None,
+            "updatesCount": len(data_items),
+            "statusFound": bool(chosen_status),
+            "rawStatus": _first(chosen, ("status",))
+            or _first(chosen, ("message", "status"))
+            or _first(chosen, ("update", "status"))
+            or _first(chosen, ("messageUpdate", "status")),
+        },
+        "context": {
+            "instance": payload.get("instance"),
+            "remoteJid": remote_jid or None,
+            "fromMe": from_me,
+        },
+        "status": chosen_status or "unknown",
+        "messageId": message_id or None,
+        "fromMe": from_me,
+        "sender": payload.get("instance") if from_me else (remote_jid or payload.get("instance")),
+        "recipient": remote_jid or payload.get("instance"),
+        "messageType": "delivery",
+        "text": chosen_status or "unknown",
+        "forwarding": {"status": "n/a"},
+        "error": None,
+        "message": {
+            "id": message_id or None,
+            "from": remote_jid or None,
+            "fromMe": from_me,
+            "kind": "delivery",
+            "text": chosen_status or "unknown",
+            "messageType": "messages.update",
+        },
+        "raw": payload,
+    }
+
+
 def _extract_media(message: dict[str, Any], kind: str) -> dict[str, Any] | None:
     media_key_name = next((k for k in MEDIA_MESSAGE_KEYS if k in message), None)
     if not media_key_name:
@@ -130,6 +232,126 @@ def _extract_media(message: dict[str, Any], kind: str) -> dict[str, Any] | None:
     }
 
 
+def _extract_text(message: dict[str, Any]) -> str | None:
+    text = _first(
+        message,
+        ("conversation",),
+        ("extendedTextMessage", "text"),
+        ("imageMessage", "caption"),
+        ("videoMessage", "caption"),
+    )
+    return str(text) if text is not None else None
+
+
+def _phone_from_jid(jid: str | None) -> str | None:
+    value = str(jid or "").strip()
+    if not value:
+        return None
+    return value.split("@", 1)[0] or None
+
+
+def _extract_context_info(message: dict[str, Any], message_type: str) -> dict[str, Any]:
+    mt = str(message_type or "")
+    if mt == "extendedTextMessage":
+        return _ensure_dict(_first(message, ("extendedTextMessage", "contextInfo")))
+    return _ensure_dict(_first(message, (mt, "contextInfo")))
+
+
+def _extract_quoted_summary(context_info: dict[str, Any]) -> dict[str, Any] | None:
+    stanza_id = str(context_info.get("stanzaId") or "").strip()
+    participant = str(context_info.get("participant") or "").strip()
+    remote_jid = str(context_info.get("remoteJid") or "").strip()
+    quoted_message = _ensure_dict(context_info.get("quotedMessage"))
+    quoted_type = str(next(iter(quoted_message.keys()), "unknown"))
+    quoted_text = _extract_text(quoted_message)
+
+    if not stanza_id and not participant and not remote_jid and not quoted_message:
+        return None
+
+    media_type = None
+    if quoted_type == "audioMessage":
+        media_type = "voice_note" if bool(_first(quoted_message, ("audioMessage", "ptt"))) else "audio"
+    elif quoted_type in {"imageMessage", "videoMessage", "documentMessage", "stickerMessage"}:
+        media_type = quoted_type.replace("Message", "").lower()
+
+    preview = quoted_text
+    if not preview and media_type:
+        preview = f"[{media_type}]"
+
+    return {
+        "messageId": stanza_id or None,
+        "sender": participant or None,
+        "chatJid": remote_jid or None,
+        "type": quoted_type,
+        "text": quoted_text,
+        "mediaType": media_type,
+        "preview": preview,
+        "raw": quoted_message or None,
+    }
+
+
+def _extract_mentions(context_info: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_mentions = context_info.get("mentionedJid")
+    if not isinstance(raw_mentions, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for item in raw_mentions:
+        jid = str(item or "").strip()
+        if not jid:
+            continue
+        items.append({"jid": jid, "phone": _phone_from_jid(jid)})
+    return items
+
+
+def _build_chat_context(data: dict[str, Any], instance: Any) -> dict[str, Any]:
+    remote_jid = str(_first(data, ("key", "remoteJid")) or "")
+    participant = str(_first(data, ("key", "participant")) or "")
+    is_group = remote_jid.endswith("@g.us")
+    sender = participant if is_group and participant else remote_jid
+    return {
+        "jid": remote_jid or None,
+        "isGroup": is_group,
+        "groupId": remote_jid if is_group else None,
+        "participant": participant or None,
+        "sender": sender or None,
+        "instance": instance,
+    }
+
+
+def _build_context_and_metadata(data: dict[str, Any], message: dict[str, Any], message_type: str, instance: Any, from_me: bool) -> tuple[dict[str, Any], dict[str, Any]]:
+    context_info = _extract_context_info(message, message_type)
+    quoted = _extract_quoted_summary(context_info)
+    mentions = _extract_mentions(context_info)
+    chat = _build_chat_context(data, instance)
+    is_reply = quoted is not None
+    is_group_reply = bool(is_reply and chat.get("isGroup"))
+    is_self_reply = bool(is_reply and from_me)
+
+    forwarding_score = context_info.get("forwardingScore")
+    score_value = int(forwarding_score) if str(forwarding_score or "").isdigit() else 0
+    has_business_forward = isinstance(context_info.get("businessForwardInfo"), dict)
+    is_forwarded = bool(context_info.get("isForwarded")) or score_value > 0 or has_business_forward
+
+    context = {
+        "quoted": quoted,
+        "mentions": mentions,
+        "chat": chat,
+    }
+    metadata = {
+        "isReply": is_reply,
+        "isSelfReply": is_self_reply,
+        "isGroupReply": is_group_reply,
+        "replyKind": "self_reply" if is_self_reply else ("group_reply" if is_group_reply else ("reply" if is_reply else "none")),
+        "hasMentions": bool(mentions),
+        "mentionCount": len(mentions),
+        "forwarded": is_forwarded,
+        "forwardingScore": score_value if is_forwarded else 0,
+        "businessForwardInfo": context_info.get("businessForwardInfo") if has_business_forward else None,
+        "messageTimestamp": data.get("messageTimestamp"),
+    }
+    return context, metadata
+
+
 def normalize_webhook(payload: dict[str, Any]) -> dict[str, Any]:
     source_event = str(payload.get("event", "UNKNOWN"))
     event = _canonical_event_name(source_event)
@@ -147,42 +369,7 @@ def normalize_webhook(payload: dict[str, Any]) -> dict[str, Any]:
         return {**base, "layer": "technical", "reason": "technical_event"}
 
     if event == "MESSAGES_UPDATE":
-        status_value = str(
-            _first(payload, ("data", "status"))
-            or _first(payload, ("data", "message", "status"))
-            or _first(payload, ("data", "update", "status"))
-            or ""
-        ).strip().lower()
-        if not status_value:
-            return {**base, "layer": "technical", "reason": "status_missing"}
-
-        sender = str(_first(payload, ("data", "key", "remoteJid")) or "")
-        from_me = bool(_first(payload, ("data", "key", "fromMe")))
-        return {
-            **base,
-            "layer": "business",
-            "direction": "system",
-            "type": "delivery",
-            "messageType": "delivery",
-            "sender": payload.get("instance") if from_me else sender,
-            "recipient": sender if from_me else payload.get("instance"),
-            "content": status_value,
-            "text": status_value,
-            "status": status_value,
-            "fromMe": from_me,
-            "fromBot": False,
-            "forwarding": {"status": "n/a"},
-            "error": None,
-            "message": {
-                "id": _first(payload, ("data", "key", "id")),
-                "from": _first(payload, ("data", "key", "remoteJid")),
-                "fromMe": from_me,
-                "kind": "delivery",
-                "text": status_value,
-            },
-            "media": None,
-            "raw": payload,
-        }
+        return _normalize_message_update(payload, base)
 
     # Evolution/Baileys emite mensajes reales principalmente via messages.upsert.
     # Nunca debe clasificarse como técnico porque es el evento de negocio base del chat.
@@ -198,34 +385,37 @@ def normalize_webhook(payload: dict[str, Any]) -> dict[str, Any]:
         return {**base, "layer": "technical", "reason": f"ignored_message_type:{message_type_lower}"}
 
     kind = _guess_kind(message, message_type)
-    if kind not in BUSINESS_MESSAGE_TYPES:
-        return {**base, "layer": "technical", "reason": f"unknown_kind:{kind}"}
+    is_unknown_fallback = kind not in BUSINESS_MESSAGE_TYPES
 
-    text = _first(
-        message,
-        ("conversation",),
-        ("extendedTextMessage", "text"),
-        ("imageMessage", "caption"),
-        ("videoMessage", "caption"),
-    )
+    text = _extract_text(message)
 
     from_me = bool(_first(data, ("key", "fromMe")))
     remote_jid = _first(data, ("key", "remoteJid"))
+    normalized_subtype = kind if not is_unknown_fallback else "unknown"
+    context, metadata = _build_context_and_metadata(data, message, message_type, payload.get("instance"), from_me)
+    normalized_content: Any = {"text": text} if text is not None else {"text": ""}
+    if is_unknown_fallback:
+        normalized_content = {"text": "[Unsupported message type]"}
+
     normalized = {
         **base,
         "layer": "business",
         "direction": "inbound" if not from_me else "outbound",
         "type": "message",
-        "messageType": kind,
+        "subtype": normalized_subtype,
+        "originalType": message_type,
+        "messageType": normalized_subtype,
         "sender": payload.get("instance") if from_me else remote_jid,
         "recipient": remote_jid if from_me else payload.get("instance"),
-        "content": text,
+        "content": normalized_content,
         "text": text,
         "status": "received",
         "fromMe": from_me,
         "fromBot": False,
         "forwarding": {"status": "pending"},
         "error": None,
+        "metadata": {**metadata, "unknownTypeDetected": is_unknown_fallback},
+        "context": context,
         "message": {
             "id": _first(data, ("key", "id")),
             "from": remote_jid,
@@ -233,11 +423,11 @@ def normalize_webhook(payload: dict[str, Any]) -> dict[str, Any]:
             "participant": _first(data, ("key", "participant")),
             "pushName": data.get("pushName"),
             "messageType": message_type,
-            "kind": kind,
+            "kind": normalized_subtype,
             "text": text,
             "messageTimestamp": data.get("messageTimestamp"),
         },
-        "media": _extract_media(message, kind),
+        "media": _extract_media(message, kind if not is_unknown_fallback else "unknown"),
         "raw": payload,
     }
     return normalized

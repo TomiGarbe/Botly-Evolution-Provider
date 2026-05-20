@@ -163,26 +163,35 @@ async def _forward_to_instance_webhooks(payload: dict[str, Any], request_id: str
 def _to_bot_payload(normalized: dict[str, Any]) -> dict[str, Any] | None:
     if normalized.get("layer") != "business":
         return None
-    if normalized.get("type") != "message":
-        return None
 
-    message_type = str(normalized.get("messageType") or "")
-    if message_type not in {"text", "audio", "image", "video", "document", "sticker", "voice_note"}:
+    normalized_type = str(normalized.get("type") or "")
+    subtype = str(normalized.get("subtype") or normalized.get("messageType") or "")
+    if normalized_type == "message":
+        pass
+    elif normalized_type == "event" and subtype == "message_status":
+        pass
+    else:
         return None
 
     return {
         "id": normalized.get("id"),
-        "type": "message",
+        "type": normalized_type,
+        "subtype": subtype,
+        "originalType": normalized.get("originalType"),
         "instance": normalized.get("instance"),
         "timestamp": normalized.get("timestamp"),
         "direction": normalized.get("direction"),
-        "messageType": message_type,
+        "messageType": subtype,
+        "messageId": normalized.get("messageId"),
         "sender": normalized.get("sender"),
         "recipient": normalized.get("recipient"),
         "text": normalized.get("text"),
         "content": normalized.get("content"),
         "media": normalized.get("media"),
         "status": normalized.get("status"),
+        "metadata": normalized.get("metadata"),
+        "context": normalized.get("context"),
+        "raw": normalized.get("raw"),
         "meta": normalized.get("meta"),
     }
 
@@ -224,13 +233,23 @@ async def receive_webhook(request: Request):
             provided_key = body_key
             provided_source = "payload.apikey"
 
-    if expected_key and provided_key and provided_key != expected_key:
+    if expected_key and not provided_key:
+        logger.warning("webhook_auth_missing", instance=payload.get("instance"), source=provided_source)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Webhook auth missing")
+
+    if expected_key and provided_key != expected_key:
         logger.warning(
-            "webhook_apikey_mismatch",
+            "webhook_auth_failed",
             instance=payload.get("instance"),
             source=provided_source,
             received_prefix=provided_key[:8],
         )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Webhook auth failed")
+
+    if expected_key:
+        logger.info("webhook_auth_success", instance=payload.get("instance"), source=provided_source)
+    else:
+        logger.warning("webhook_auth_disabled_missing_expected_key", instance=payload.get("instance"))
 
     raw_event = str(payload.get("event", "UNKNOWN"))
     instance = str(payload.get("instance", "unknown"))
@@ -345,21 +364,25 @@ async def receive_webhook(request: Request):
     )
 
     normalized_kind = (normalized.get("message") or {}).get("kind")
-    if normalized_kind == "text":
-        logger.info(
-            "incoming_text_message",
-            request_id=request_id,
-            instance=normalized.get("instance"),
-            sender=normalized.get("sender"),
-        )
-    else:
-        logger.info(
-            "webhook_normalized",
-            request_id=request_id,
-            source_event=normalized.get("event"),
-            instance=normalized.get("instance"),
-            kind=normalized_kind,
-        )
+    logger.info(
+        "webhook_normalized",
+        request_id=request_id,
+        source_event=normalized.get("event"),
+        instance=normalized.get("instance"),
+        normalized_type=normalized.get("type"),
+        normalized_subtype=normalized.get("subtype") or normalized_kind,
+        original_type=normalized.get("originalType"),
+        fallback_used=bool((normalized.get("metadata") or {}).get("unknownTypeDetected")),
+        has_media=bool(normalized.get("media")),
+        has_context=bool(normalized.get("context")),
+        has_quoted=bool(((normalized.get("context") or {}).get("quoted"))),
+        has_mentions=bool(((normalized.get("context") or {}).get("mentions"))),
+        is_forwarded=bool((normalized.get("metadata") or {}).get("forwarded")),
+        is_group=bool((((normalized.get("context") or {}).get("chat")) or {}).get("isGroup")),
+        quoted_type=(((normalized.get("context") or {}).get("quoted")) or {}).get("type"),
+        quoted_preview=(((normalized.get("context") or {}).get("quoted")) or {}).get("preview"),
+        unknown_type_detected=bool((normalized.get("metadata") or {}).get("unknownTypeDetected")),
+    )
 
     bot_payload = _to_bot_payload(normalized)
     if not bot_payload:
