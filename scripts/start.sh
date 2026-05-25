@@ -15,5 +15,5 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 
 echo "▶ Levantando servicios..."
-docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d "$@"
+docker compose -p evolution -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d "$@"
 echo "✓ Servicios arriba. Evolution disponible en http://localhost:$(grep EVOLUTION_PORT "$ENV_FILE" | cut -d= -f2 || echo 8080)"

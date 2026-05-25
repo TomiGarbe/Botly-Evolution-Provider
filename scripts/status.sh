@@ -8,7 +8,7 @@ COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
 ENV_FILE="$REPO_ROOT/config/.env"
 
 echo "── Estado de contenedores ─────────────────"
-docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" ps
+docker compose -p evolution -f "$COMPOSE_FILE" --env-file "$ENV_FILE" ps
 
 echo ""
 echo "── Health check Evolution API ─────────────"

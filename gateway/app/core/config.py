@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     instance_api_keys_path: str = "/tmp/botly_instance_api_keys.json"
     instance_webhooks_path: str = "/tmp/botly_instance_webhooks.json"
     instance_webhook_timeout: int = 8
+    webhook_debug: bool = False
+    webhook_dispatch_history_limit: int = 30
+    allow_insecure_evolution_webhooks: bool = False
+    evolution_auth_cache_ttl_seconds: int = 45
 
     model_config = SettingsConfigDict(
         # En Docker las variables llegan por environment: en el compose.

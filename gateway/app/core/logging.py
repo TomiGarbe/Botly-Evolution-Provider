@@ -3,6 +3,7 @@ import sys
 from typing import Any
 
 import structlog
+from app.core.config import get_settings
 
 
 def setup_logging(level: str = "info") -> None:
@@ -14,9 +15,11 @@ def setup_logging(level: str = "info") -> None:
         stream=sys.stdout,
         level=log_level,
     )
+    settings = get_settings()
+    verbose_debug = bool(settings.webhook_debug)
     # Reduce ruido de transporte HTTP y access logs en modo normal.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.INFO if verbose_debug else logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.INFO if verbose_debug else logging.WARNING)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
     structlog.configure(

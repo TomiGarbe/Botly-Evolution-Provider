@@ -26,6 +26,7 @@ limiter = Limiter(key_func=get_remote_address, default_limits=[settings.rate_lim
 
 
 async def _startup_recovery() -> None:
+    logger.info("[BOOT][INIT] startup recovery begin")
     try:
         fetched = await evolution.fetch_instances()
     except Exception as exc:
@@ -46,11 +47,21 @@ async def _startup_recovery() -> None:
             asyncio.create_task(instances._configure_webhook_if_needed(name))
 
     logger.info("startup_recovery_summary", reconnect_candidates=reconnect_candidates)
+    logger.info("[BOOT][SESSIONS] recovery completed", instances_loaded=len(instances_list), reconnect_candidates=reconnect_candidates)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("gateway_starting", port=settings.gateway_port, debug=settings.debug)
+    logger.info("[BOOT][DB] evolution connectivity setup", evolution_url=settings.evolution_url)
+    logger.info(
+        "[BOOT][VOLUMES] gateway persistence paths",
+        instance_api_keys_path=settings.instance_api_keys_path,
+        instance_webhooks_path=settings.instance_webhooks_path,
+        media_cache_dir=settings.media_cache_dir,
+    )
+    logger.info("[BOOT][MIGRATIONS] gateway has no DB migrations at startup")
+    logger.info("[BOOT][WEBHOOKS] instance webhook registry bootstrap", storage_path=settings.instance_webhooks_path)
     await evolution.get_client()
     try:
         await _startup_recovery()
@@ -79,7 +90,11 @@ app.add_middleware(AuthMiddleware)
 app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
+    ],
+    allow_origin_regex=r"^https?://localhost(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
 )

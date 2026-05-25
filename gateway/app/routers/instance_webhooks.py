@@ -1,10 +1,8 @@
 import time
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, HTTPException, Request
 
-from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.models.requests import WebhookConfigRequest, WebhookEnabledRequest
 from app.services.instance_webhooks import (
@@ -13,11 +11,13 @@ from app.services.instance_webhooks import (
     delete_webhook,
     get_webhook,
     list_instance_webhooks,
-    mark_dispatch_result,
     mask_headers_for_log,
     set_webhook_enabled,
+    set_webhook_filters,
     update_webhook,
 )
+from app.services.webhook_delivery import dispatch_webhook_with_retry
+from app.services.webhook_delivery import diagnose_webhook_target
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/instances/{instance_name}/webhooks", tags=["instance-webhooks"])
@@ -64,6 +64,7 @@ async def create_webhook_route(instance_name: str, request: Request, body: Webho
         auth_type=body.authType,
         auth_config=body.authConfig,
         custom_headers=body.customHeaders,
+        event_filters=body.eventFilters,
     )
     logger.info("webhook_create", instance=name, webhook_id=item["id"], auth_type=item["authType"])
     return item
@@ -81,6 +82,7 @@ async def update_webhook_route(instance_name: str, webhook_id: str, request: Req
         auth_type=body.authType,
         auth_config=body.authConfig,
         custom_headers=body.customHeaders,
+        event_filters=body.eventFilters,
     )
     if not item:
         raise HTTPException(status_code=404, detail="Webhook no encontrado")
@@ -93,6 +95,16 @@ async def set_enabled_route(instance_name: str, webhook_id: str, request: Reques
     name = _validate_instance_name(instance_name)
     _check_instance_scope(request, name)
     item = set_webhook_enabled(name, webhook_id, enabled=body.enabled)
+    if not item:
+        raise HTTPException(status_code=404, detail="Webhook no encontrado")
+    return item
+
+
+@router.patch("/{webhook_id}/filters")
+async def set_filters_route(instance_name: str, webhook_id: str, request: Request, body: dict[str, bool]):
+    name = _validate_instance_name(instance_name)
+    _check_instance_scope(request, name)
+    item = set_webhook_filters(name, webhook_id, body)
     if not item:
         raise HTTPException(status_code=404, detail="Webhook no encontrado")
     return item
@@ -112,78 +124,139 @@ async def delete_webhook_route(instance_name: str, webhook_id: str, request: Req
 @router.post("/{webhook_id}/test")
 async def test_webhook_route(instance_name: str, webhook_id: str, request: Request):
     name = _validate_instance_name(instance_name)
+    logger.info("[WEBHOOK_TEST][START] webhook test requested", instance=name, webhook_id=webhook_id)
+    _check_instance_scope(request, name)
+
+    try:
+        item = get_webhook(name, webhook_id, reveal_secrets=True)
+        logger.info(
+            "[WEBHOOK_TEST][LOAD] webhook loaded",
+            instance=name,
+            webhook_id=webhook_id,
+            found=bool(item),
+        )
+        if not item:
+            raise HTTPException(status_code=404, detail="Webhook no encontrado")
+        if not item.get("enabled"):
+            raise HTTPException(status_code=400, detail="Webhook deshabilitado")
+
+        logger.info(
+            "[WEBHOOK_TEST][AUTH] webhook auth metadata",
+            instance=name,
+            webhook_id=webhook_id,
+            auth_type=item.get("authType"),
+            has_auth_config=bool(item.get("authConfig")),
+            has_custom_headers=bool(item.get("customHeaders")),
+        )
+
+        url = _validate_url(str(item.get("url") or ""))
+        payload: dict[str, Any] = {
+            "id": "test_webhook",
+            "event": "TEST_WEBHOOK",
+            "instance": name,
+            "timestamp": int(time.time() * 1000),
+            "layer": "business",
+            "type": "message",
+            "messageType": "text",
+            "sender": "test@botly",
+            "recipient": name,
+            "text": "test webhook",
+            "content": "test webhook",
+            "status": "received",
+            "message": {"id": "test-msg", "kind": "text", "from": "test@botly", "text": "test webhook"},
+            "meta": {"source": "manual_test"},
+            "category": "business_message",
+        }
+        logger.info(
+            "[WEBHOOK_TEST][PAYLOAD] payload ready",
+            instance=name,
+            webhook_id=webhook_id,
+            url=url,
+            payload_event=payload.get("event"),
+            payload_type=payload.get("type"),
+        )
+
+        logger.info("[WEBHOOK_TEST][SEND] dispatch start", instance=name, webhook_id=webhook_id, url=url)
+        result = await dispatch_webhook_with_retry(
+            payload=payload,
+            request_id=f"test-{webhook_id[:6]}",
+            item=item,
+            test_mode=True,
+        )
+        logger.info(
+            "[WEBHOOK_TEST][RESPONSE] dispatch finished",
+            instance=name,
+            webhook_id=webhook_id,
+            ok=bool(result.get("ok")),
+            status_code=result.get("statusCode"),
+            status=result.get("status"),
+            retries_used=result.get("retriesUsed"),
+            latency_ms=result.get("latencyMs"),
+        )
+        return {
+            "ok": bool(result.get("ok")),
+            "status": int(result.get("statusCode") or 0),
+            "error": result.get("error"),
+            "retriesUsed": int(result.get("retriesUsed") or 0),
+            "latencyMs": float(result.get("latencyMs") or 0.0),
+            "dispatchStatus": result.get("status"),
+            "request": {
+                "payload": payload,
+                "headers": {
+                    "authType": item.get("authType"),
+                    "masked": mask_headers_for_log({"Content-Type": "application/json", **build_auth_headers(item)}),
+                },
+                "url": url,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "[WEBHOOK_TEST][ERROR] unhandled exception during webhook test",
+            instance=name,
+            webhook_id=webhook_id,
+            error=str(exc),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "WEBHOOK_TEST_INTERNAL_ERROR",
+                "message": "Fallo interno ejecutando test de webhook",
+                "error": str(exc),
+            },
+        ) from exc
+
+
+@router.get("/{webhook_id}/dispatches")
+async def list_dispatches_route(instance_name: str, webhook_id: str, request: Request, limit: int = 20):
+    name = _validate_instance_name(instance_name)
+    _check_instance_scope(request, name)
+    item = get_webhook(name, webhook_id, reveal_secrets=False)
+    if not item:
+        raise HTTPException(status_code=404, detail="Webhook no encontrado")
+    history = item.get("dispatchHistory") if isinstance(item.get("dispatchHistory"), list) else []
+    safe_limit = max(1, min(limit, 100))
+    return {"items": history[:safe_limit]}
+
+
+@router.post("/{webhook_id}/diagnose")
+async def diagnose_webhook_route(instance_name: str, webhook_id: str, request: Request):
+    name = _validate_instance_name(instance_name)
     _check_instance_scope(request, name)
     item = get_webhook(name, webhook_id, reveal_secrets=True)
     if not item:
         raise HTTPException(status_code=404, detail="Webhook no encontrado")
-    if not item.get("enabled"):
-        raise HTTPException(status_code=400, detail="Webhook deshabilitado")
-    logger.info("webhook_test", instance=name, webhook_id=webhook_id, phase="start")
-
     url = _validate_url(str(item.get("url") or ""))
-    payload: dict[str, Any] = {
-        "id": "test_webhook",
-        "event": "TEST_WEBHOOK",
-        "instance": name,
-        "timestamp": int(time.time() * 1000),
-        "layer": "business",
-        "type": "message",
-        "messageType": "text",
-        "sender": "test@botly",
-        "recipient": name,
-        "text": "test webhook",
-        "content": "test webhook",
-        "status": "received",
-        "message": {"id": "test-msg", "kind": "text", "from": "test@botly", "text": "test webhook"},
-        "meta": {"source": "manual_test"},
-    }
-
-    headers = {"Content-Type": "application/json", **build_auth_headers(item)}
+    logger.info("webhook_network_diagnose_start", instance=name, webhook_id=webhook_id, url=url)
+    result = await diagnose_webhook_target(url=url, timeout_s=8.0)
     logger.info(
-        "webhook_dispatch_start",
+        "webhook_network_diagnose_result",
         instance=name,
         webhook_id=webhook_id,
-        url=url,
-        headers=mask_headers_for_log(headers),
-        test_mode=True,
+        dns_ok=result.get("dns", {}).get("resolved"),
+        tcp_ok=result.get("tcp", {}).get("ok"),
+        http_ok=result.get("http", {}).get("ok"),
+        http_status=result.get("http", {}).get("statusCode"),
     )
-
-    settings = get_settings()
-    timeout = httpx.Timeout(
-        connect=min(5.0, float(settings.instance_webhook_timeout)),
-        read=float(settings.instance_webhook_timeout),
-        write=min(8.0, float(settings.instance_webhook_timeout)),
-        pool=2.0,
-    )
-
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-        if resp.status_code < 200 or resp.status_code >= 300:
-            text = (resp.text or "")[:220]
-            status_value = f"http_{resp.status_code}"
-            mark_dispatch_result(name, webhook_id, status=status_value, error=text)
-            logger.warning(
-                "webhook_dispatch_non_2xx",
-                instance=name,
-                webhook_id=webhook_id,
-                status_code=resp.status_code,
-                error=text,
-                test_mode=True,
-            )
-            return {"ok": False, "status": resp.status_code, "error": text}
-
-        mark_dispatch_result(name, webhook_id, status=f"ok_{resp.status_code}", error=None)
-        logger.info("webhook_dispatch_success", instance=name, webhook_id=webhook_id, status_code=resp.status_code, test_mode=True)
-        logger.info("webhook_test", instance=name, webhook_id=webhook_id, phase="done", ok=True, status=resp.status_code)
-        return {"ok": True, "status": resp.status_code}
-    except httpx.TimeoutException as exc:
-        mark_dispatch_result(name, webhook_id, status="timeout", error=str(exc))
-        logger.warning("webhook_dispatch_timeout", instance=name, webhook_id=webhook_id, error=str(exc), test_mode=True)
-        logger.warning("webhook_test", instance=name, webhook_id=webhook_id, phase="done", ok=False, status=504, error="timeout")
-        return {"ok": False, "status": 504, "error": "timeout"}
-    except Exception as exc:
-        mark_dispatch_result(name, webhook_id, status="connection_fail", error=str(exc))
-        logger.error("webhook_dispatch_connection_fail", instance=name, webhook_id=webhook_id, error=str(exc), test_mode=True)
-        logger.error("webhook_test", instance=name, webhook_id=webhook_id, phase="done", ok=False, status=502, error=str(exc))
-        return {"ok": False, "status": 502, "error": str(exc)}
+    return result

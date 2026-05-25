@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Copy, FlaskConical, Pencil, Plus, Power, Save, Trash2 } from 'lucide-react'
 import type { GatewayConfig } from '../lib/config'
 import { api, ApiError } from '../lib/api'
-import type { Instance, InstanceWebhook, WebhookAuthType } from '../types'
+import type { Instance, InstanceWebhook, PipelineEvent, WebhookAuthType, WebhookDispatchLog } from '../types'
 
 interface Props {
   config: GatewayConfig
@@ -60,6 +60,9 @@ export default function WebhooksManager({ config, instances, onToast }: Props) {
   const [saving, setSaving] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [form, setForm] = useState<FormState>(toForm())
+  const [dispatchLogs, setDispatchLogs] = useState<Record<string, WebhookDispatchLog[]>>({})
+  const [diagResult, setDiagResult] = useState<Record<string, unknown> | null>(null)
+  const [evolutionAuthEvents, setEvolutionAuthEvents] = useState<PipelineEvent[]>([])
 
   useEffect(() => {
     if (!instanceName && instances.length > 0) setInstanceName(instances[0].name)
@@ -167,15 +170,53 @@ export default function WebhooksManager({ config, instances, onToast }: Props) {
     try {
       const res = await api.webhooks.test(config, instanceName, item.id)
       onToast(res.ok ? `Test OK (${res.status})` : `Test fail (${res.status}) ${res.error || ''}`, res.ok ? 'success' : 'error')
+      const dispatches = await api.webhooks.dispatches(config, instanceName, item.id, 20)
+      setDispatchLogs(prev => ({ ...prev, [item.id]: dispatches.items || [] }))
       await load()
     } catch (error) {
       onToast(error instanceof ApiError ? error.message : 'Error testeando webhook', 'error')
     }
   }
 
+  const onLoadDispatches = async (item: InstanceWebhook) => {
+    if (!instanceName) return
+    try {
+      const res = await api.webhooks.dispatches(config, instanceName, item.id, 20)
+      setDispatchLogs(prev => ({ ...prev, [item.id]: Array.isArray(res.items) ? res.items : [] }))
+    } catch (error) {
+      onToast(error instanceof ApiError ? error.message : 'Error cargando dispatches', 'error')
+    }
+  }
+
+  const onDiagnose = async (item: InstanceWebhook) => {
+    if (!instanceName) return
+    try {
+      const res = await api.webhooks.diagnose(config, instanceName, item.id)
+      setDiagResult(res)
+      onToast('Diagnostico ejecutado', 'info')
+    } catch (error) {
+      onToast(error instanceof ApiError ? error.message : 'Error ejecutando diagnostico', 'error')
+    }
+  }
+
+  const onLoadEvolutionAuth = async () => {
+    try {
+      const res = await api.webhooks.events<PipelineEvent>(config, instanceName || undefined, 200)
+      const items = Array.isArray(res.items) ? res.items : []
+      const filtered = items.filter(event => event.layer === 'operational' && event.pipeline?.stage === 'evolution_auth')
+      setEvolutionAuthEvents(filtered.slice(0, 40))
+    } catch (error) {
+      onToast(error instanceof ApiError ? error.message : 'Error cargando auth evolution', 'error')
+    }
+  }
+
   return (
     <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
       <div className="xl:col-span-2 border border-zinc-800 bg-zinc-900 rounded-xl overflow-hidden">
+        <div className="p-4 border-b border-zinc-800 bg-zinc-950/60">
+          <p className="text-xs text-zinc-300">Internal Evolution Webhook: Evolution -&gt; Gateway /webhooks/evolution (auth por EVOLUTION_API_KEY).</p>
+          <p className="text-xs text-zinc-400 mt-1">External Bot Webhooks: Gateway -&gt; Bot URL (auth por authType de cada webhook).</p>
+        </div>
         <div className="p-4 border-b border-zinc-800 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <span className="text-sm text-zinc-400">Instancia</span>
@@ -189,6 +230,25 @@ export default function WebhooksManager({ config, instances, onToast }: Props) {
           </div>
           <button onClick={resetForm} className="text-xs text-zinc-300 border border-zinc-700 rounded-md px-2 py-1 flex items-center gap-1"><Plus size={13} />Nuevo</button>
         </div>
+        <div className="p-4 border-b border-zinc-800">
+          <button onClick={onLoadEvolutionAuth} className="text-xs text-zinc-300 border border-zinc-700 rounded-md px-2 py-1">
+            Cargar Evolution Auth Events
+          </button>
+          {evolutionAuthEvents.length > 0 && (
+            <details className="mt-3 text-xs text-zinc-300 border border-zinc-800 rounded-md p-2">
+              <summary className="cursor-pointer">Internal Evolution Events ({evolutionAuthEvents.length})</summary>
+              <div className="mt-2 space-y-2">
+                {evolutionAuthEvents.map(item => (
+                  <div key={item.id || String(item.timestamp)} className="border border-zinc-800 rounded-md p-2">
+                    <p>{new Date(item.timestamp).toLocaleString()} | instance={item.instance || '-'} | status={item.pipeline?.status || '-'}</p>
+                    <p>source={String((item.details || {}).source || '-')} expected={String((item.details || {}).expectedGlobalPrefix || '-')} received={String((item.details || {}).receivedPrefix || '-')}</p>
+                    <p>event={item.event || '-'} mode={String((item.details || {}).acceptedMode || '-')}</p>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
 
         <div className="divide-y divide-zinc-800">
           {loading ? <p className="p-4 text-sm text-zinc-500">Cargando...</p> : items.length === 0 ? <p className="p-4 text-sm text-zinc-500">Sin webhooks</p> : items.map(item => (
@@ -196,11 +256,13 @@ export default function WebhooksManager({ config, instances, onToast }: Props) {
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <p className="text-sm font-medium text-zinc-100 truncate">{item.url}</p>
-                  <p className="text-xs text-zinc-500">{item.authType} • {item.enabled ? 'enabled' : 'disabled'}</p>
+                  <p className="text-xs text-zinc-500">{item.authType} â€¢ {item.enabled ? 'enabled' : 'disabled'}</p>
                 </div>
                 <div className="flex items-center gap-1">
                   <button onClick={() => navigator.clipboard.writeText(item.url)} className="p-1.5 border border-zinc-700 rounded-md text-zinc-300" title="Copy URL"><Copy size={13} /></button>
                   <button onClick={() => onTest(item)} className="p-1.5 border border-zinc-700 rounded-md text-zinc-300" title="Test webhook"><FlaskConical size={13} /></button>
+                  <button onClick={() => onLoadDispatches(item)} className="px-2 py-1.5 border border-zinc-700 rounded-md text-zinc-300 text-xs">Dispatches</button>
+                  <button onClick={() => onDiagnose(item)} className="px-2 py-1.5 border border-zinc-700 rounded-md text-zinc-300 text-xs">Diagnose</button>
                   <button onClick={() => onToggle(item)} className="p-1.5 border border-zinc-700 rounded-md text-zinc-300" title="Enable/Disable"><Power size={13} /></button>
                   <button onClick={() => onEdit(item)} className="p-1.5 border border-zinc-700 rounded-md text-zinc-300" title="Editar"><Pencil size={13} /></button>
                   <button onClick={() => onDelete(item)} className="p-1.5 border border-red-900 rounded-md text-red-300" title="Eliminar"><Trash2 size={13} /></button>
@@ -212,7 +274,26 @@ export default function WebhooksManager({ config, instances, onToast }: Props) {
                 <span>last error: {item.lastError || '-'}</span>
                 <span className="mx-2">|</span>
                 <span>last run: {item.lastUsedAt || '-'}</span>
+                <span className="mx-2">|</span>
+                <span>filters: b={String(item.eventFilters?.business ?? true)} t={String(item.eventFilters?.transport ?? false)} o={String(item.eventFilters?.operational ?? false)}</span>
               </div>
+              {(dispatchLogs[item.id] || []).length > 0 && (
+                <details className="text-xs text-zinc-400 bg-zinc-950/60 border border-zinc-800 rounded-md p-2">
+                  <summary className="cursor-pointer">Ultimos dispatches ({dispatchLogs[item.id].length})</summary>
+                  <div className="mt-2 space-y-2">
+                    {(dispatchLogs[item.id] || []).map(row => (
+                      <div key={`${row.dispatchId || 'disp'}_${row.timestamp}`} className="border border-zinc-800 rounded-md p-2">
+                        <p>{new Date(row.timestamp).toLocaleString()} | {row.status} | code={row.responseCode ?? '-'} | {row.durationMs ?? 0}ms | retry={row.retryCount ?? 0}</p>
+                        <p>dispatch={row.dispatchId || '-'} subtype={row.eventSubtype || '-'} error={row.error || '-'}</p>
+                        <details>
+                          <summary className="cursor-pointer">expandir trace</summary>
+                          <pre className="mt-1 whitespace-pre-wrap">{JSON.stringify(row, null, 2)}</pre>
+                        </details>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
             </div>
           ))}
         </div>
@@ -242,6 +323,12 @@ export default function WebhooksManager({ config, instances, onToast }: Props) {
 
         <textarea value={form.customHeadersText} onChange={e => setForm(v => ({ ...v, customHeadersText: e.target.value }))} rows={6} className="bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm font-mono" placeholder='{"x-env":"prod"}' />
         <button disabled={saving || !instanceName} onClick={onSubmit} className="bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-md py-2 text-sm font-medium flex items-center justify-center gap-2"><Save size={14} />{saving ? 'Guardando...' : 'Guardar webhook'}</button>
+        {diagResult && (
+          <details className="text-xs text-zinc-300 border border-zinc-800 rounded-md p-2">
+            <summary className="cursor-pointer">Diagnostico red (gateway -&gt; bot)</summary>
+            <pre className="mt-2 whitespace-pre-wrap">{JSON.stringify(diagResult, null, 2)}</pre>
+          </details>
+        )}
       </div>
     </div>
   )

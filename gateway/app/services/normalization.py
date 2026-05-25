@@ -16,7 +16,6 @@ MEDIA_MESSAGE_KEYS = (
 )
 
 IGNORED_MESSAGE_TYPES = {
-    "protocolmessage",
     "senderkeydistributionmessage",
     "messagecontextinfo",
     "encmessage",
@@ -31,6 +30,15 @@ BUSINESS_MESSAGE_TYPES = {
     "document",
     "sticker",
     "voice_note",
+    "interactive_reply",
+    "interactive_unknown",
+    "interactive_message",
+    "reaction",
+    "contact",
+    "location",
+    "poll_create",
+    "poll_update",
+    "special",
 }
 
 TECHNICAL_EVENTS = {
@@ -47,6 +55,9 @@ _raw_events: deque[dict[str, Any]] = deque(maxlen=_settings.webhook_event_retent
 _operational_events: deque[dict[str, Any]] = deque(maxlen=_settings.webhook_event_retention)
 _business_events: deque[dict[str, Any]] = deque(maxlen=_settings.webhook_event_retention)
 _media_index: dict[str, dict[str, Any]] = {}
+_business_event_keys_order: deque[str] = deque()
+_business_event_keys: set[str] = set()
+_business_event_keys_max = max(1000, _settings.webhook_event_retention * 3)
 
 STATUS_ALIASES = {
     "pending": "sent",
@@ -95,6 +106,37 @@ def _canonical_event_name(raw_event: Any) -> str:
 
 
 def _guess_kind(message: dict[str, Any], message_type: str) -> str:
+    if message_type in {
+        "buttonsResponseMessage",
+        "listResponseMessage",
+        "templateButtonReplyMessage",
+        "interactiveResponseMessage",
+        "nativeFlowResponseMessage",
+    }:
+        return "interactive_reply"
+    if message_type in {"interactiveMessage", "templateMessage", "hydratedTemplate"}:
+        return "interactive_message"
+    if message_type == "reactionMessage":
+        return "reaction"
+    if message_type in {"contactMessage", "contactsArrayMessage"}:
+        return "contact"
+    if message_type in {"locationMessage", "liveLocationMessage"}:
+        return "location"
+    if message_type == "pollCreationMessage":
+        return "poll_create"
+    if message_type == "pollUpdateMessage":
+        return "poll_update"
+    if message_type in {
+        "eventMessage",
+        "protocolMessage",
+        "editedMessage",
+        "ephemeralMessage",
+        "viewOnceMessage",
+        "viewOnceMessageV2",
+        "viewOnceMessageV2Extension",
+        "keepInChatMessage",
+    }:
+        return "special"
     if message_type in ("conversation", "extendedTextMessage"):
         return "text"
     if "stickerMessage" in message:
@@ -239,8 +281,139 @@ def _extract_text(message: dict[str, Any]) -> str | None:
         ("extendedTextMessage", "text"),
         ("imageMessage", "caption"),
         ("videoMessage", "caption"),
+        ("buttonsResponseMessage", "selectedDisplayText"),
+        ("templateButtonReplyMessage", "selectedDisplayText"),
+        ("listResponseMessage", "title"),
+        ("interactiveResponseMessage", "body", "text"),
+        ("reactionMessage", "text"),
+        ("locationMessage", "name"),
+        ("locationMessage", "address"),
+        ("pollCreationMessage", "name"),
     )
     return str(text) if text is not None else None
+
+
+def _extract_contacts(message: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    contact = _ensure_dict(message.get("contactMessage"))
+    if contact:
+        out.append(contact)
+    arr = _ensure_dict(message.get("contactsArrayMessage"))
+    for item in arr.get("contacts") or []:
+        if isinstance(item, dict):
+            out.append(item)
+
+    parsed: list[dict[str, Any]] = []
+    for node in out:
+        name = str(node.get("displayName") or node.get("name") or "").strip() or None
+        vcard = str(node.get("vcard") or "").strip() or None
+        phone = None
+        org = None
+        if vcard:
+            for raw_line in vcard.splitlines():
+                line = raw_line.strip()
+                up = line.upper()
+                if phone is None and "TEL" in up and ":" in line:
+                    phone = line.split(":", 1)[1].strip() or None
+                if org is None and up.startswith("ORG:"):
+                    org = line.split(":", 1)[1].strip() or None
+        parsed.append(
+            {
+                "name": name,
+                "phone": phone,
+                "vcard": vcard,
+                "organization": org,
+                "raw": node,
+            }
+        )
+    return parsed
+
+
+def _extract_location(message: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    node = _ensure_dict(message.get("locationMessage"))
+    live = _ensure_dict(message.get("liveLocationMessage"))
+    src = live if live else node
+    if not src:
+        return None, {}
+    content = {
+        "latitude": src.get("degreesLatitude") or src.get("latitude"),
+        "longitude": src.get("degreesLongitude") or src.get("longitude"),
+        "name": src.get("name"),
+        "address": src.get("address"),
+        "url": src.get("url"),
+    }
+    clean = {k: v for k, v in content.items() if v is not None}
+    meta = {
+        "liveLocation": bool(live),
+        "expiration": src.get("timeOffset") or src.get("expiration"),
+        "accuracy": src.get("accuracyInMeters") or src.get("accuracy"),
+    }
+    return clean or None, {k: v for k, v in meta.items() if v is not None}
+
+
+def _extract_reaction(message: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any]]:
+    node = _ensure_dict(message.get("reactionMessage"))
+    if not node:
+        return None, None, {}
+    emoji = str(node.get("text") or "").strip()
+    key = _ensure_dict(node.get("key"))
+    target = {
+        "messageId": key.get("id"),
+        "sender": key.get("participant") or key.get("remoteJid"),
+        "chatJid": key.get("remoteJid"),
+    }
+    remove_reaction = emoji == ""
+    content = {"emoji": emoji or None}
+    return content, {k: v for k, v in target.items() if v is not None}, {"removeReaction": remove_reaction}
+
+
+def _extract_poll(message: dict[str, Any], message_type: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any]]:
+    if message_type == "pollCreationMessage":
+        node = _ensure_dict(message.get("pollCreationMessage"))
+        options = []
+        for item in node.get("options") or []:
+            if isinstance(item, dict):
+                name = str(item.get("optionName") or item.get("name") or "").strip()
+                if name:
+                    options.append(name)
+        return {
+            "title": node.get("name"),
+            "options": options,
+        }, None, {"pollOptionCount": len(options)}
+    if message_type == "pollUpdateMessage":
+        node = _ensure_dict(message.get("pollUpdateMessage"))
+        selected: list[str] = []
+        for item in node.get("selectedOptions") or []:
+            if isinstance(item, str) and item.strip():
+                selected.append(item.strip())
+        poll_id = (
+            _first(node, ("pollCreationMessageKey", "id"))
+            or _first(node, ("pollCreationMessageKey", "messageId"))
+            or node.get("pollCreationMessageKey")
+        )
+        return {"selectedOptions": selected}, {"targetPollId": poll_id}, {"pollOptionCount": len(selected)}
+    return None, None, {}
+
+
+def _extract_special_flags(message: dict[str, Any], message_type: str, data: dict[str, Any], context_info: dict[str, Any]) -> dict[str, Any]:
+    token = message_type.lower()
+    protocol = _ensure_dict(message.get("protocolMessage"))
+    edited = bool(message.get("editedMessage")) or bool(protocol.get("editedMessage"))
+    revoked = bool(protocol) and str(protocol.get("type") or "").upper() in {"REVOKE", "0"}
+    ephemeral = bool(message.get("ephemeralMessage")) or bool(context_info.get("expiration")) or bool(data.get("ephemeralStartTimestamp"))
+    disappearing_mode = context_info.get("disappearingMode") or data.get("disappearingMode")
+    from_business = bool(context_info.get("externalAdReply")) or bool(context_info.get("businessMessageForwardInfo"))
+    newsletter = bool(context_info.get("forwardedNewsletterMessageInfo")) or "newsletter" in token
+    status_message = str(_first(data, ("key", "remoteJid")) or "").endswith("@status")
+    return {
+        "ephemeral": ephemeral,
+        "edited": edited,
+        "revoked": revoked,
+        "fromBusiness": from_business,
+        "newsletter": newsletter,
+        "statusMessage": status_message,
+        "disappearingMode": disappearing_mode,
+    }
 
 
 def _phone_from_jid(jid: str | None) -> str | None:
@@ -254,7 +427,124 @@ def _extract_context_info(message: dict[str, Any], message_type: str) -> dict[st
     mt = str(message_type or "")
     if mt == "extendedTextMessage":
         return _ensure_dict(_first(message, ("extendedTextMessage", "contextInfo")))
+    if mt == "templateMessage":
+        return _ensure_dict(
+            _first(message, ("templateMessage", "hydratedTemplate", "contextInfo"))
+            or _first(message, ("templateMessage", "contextInfo"))
+        )
+    if mt == "interactiveMessage":
+        return _ensure_dict(_first(message, ("interactiveMessage", "contextInfo")))
     return _ensure_dict(_first(message, (mt, "contextInfo")))
+
+
+def _to_json_object(text: str | None) -> Any:
+    if not text:
+        return None
+    try:
+        import json
+
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def _extract_interaction(message: dict[str, Any], message_type: str) -> tuple[dict[str, Any] | None, str | None]:
+    mt = str(message_type or "")
+    raw_selection: dict[str, Any] = {}
+    interaction_type = "unknown"
+    selected_id: str | None = None
+    title: str | None = None
+    description: str | None = None
+    payload: dict[str, Any] = {}
+
+    if mt == "buttonsResponseMessage":
+        node = _ensure_dict(message.get("buttonsResponseMessage"))
+        interaction_type = "button"
+        selected_id = str(node.get("selectedButtonId") or node.get("buttonId") or node.get("selectedId") or "").strip() or None
+        title = str(node.get("selectedDisplayText") or node.get("displayText") or "").strip() or None
+        raw_selection = node
+    elif mt == "templateButtonReplyMessage":
+        node = _ensure_dict(message.get("templateButtonReplyMessage"))
+        interaction_type = "button"
+        selected_id = str(node.get("selectedId") or node.get("buttonId") or "").strip() or None
+        title = str(node.get("selectedDisplayText") or node.get("displayText") or "").strip() or None
+        payload = {"selectedIndex": node.get("selectedIndex"), "hydratedButtonId": node.get("hydratedButtonId")}
+        raw_selection = node
+    elif mt == "listResponseMessage":
+        node = _ensure_dict(message.get("listResponseMessage"))
+        single = _ensure_dict(node.get("singleSelectReply"))
+        interaction_type = "list"
+        selected_id = str(single.get("selectedRowId") or node.get("rowId") or "").strip() or None
+        title = str(single.get("title") or node.get("title") or "").strip() or None
+        description = str(single.get("description") or node.get("description") or "").strip() or None
+        payload = {
+            "section": single.get("sectionTitle") or node.get("sectionTitle"),
+            "listType": node.get("listType"),
+        }
+        raw_selection = {"listResponseMessage": node, "singleSelectReply": single}
+    elif mt in {"interactiveResponseMessage", "nativeFlowResponseMessage"}:
+        node = _ensure_dict(message.get("interactiveResponseMessage")) if mt == "interactiveResponseMessage" else _ensure_dict(message.get("nativeFlowResponseMessage"))
+        native = _ensure_dict(node.get("nativeFlowResponseMessage")) if mt == "interactiveResponseMessage" else node
+        interaction_type = "flow"
+        selected_id = str(native.get("name") or "").strip() or None
+        title = str(_first(node, ("body", "text")) or "").strip() or None
+        params_json = native.get("paramsJson")
+        payload = {
+            "name": native.get("name"),
+            "version": native.get("version"),
+            "paramsJson": params_json,
+            "params": _to_json_object(str(params_json)) if params_json is not None else None,
+        }
+        raw_selection = {"interactiveResponseMessage": node, "nativeFlowResponseMessage": native}
+    elif mt in {"interactiveMessage", "templateMessage", "hydratedTemplate"}:
+        node = _ensure_dict(message.get(mt)) if mt in message else _ensure_dict(message)
+        interaction_type = "unknown"
+        raw_selection = node
+    else:
+        token = mt.lower()
+        if "interactive" in token or "template" in token or "list" in token or "button" in token:
+            return {
+                "interactionType": "unknown",
+                "id": None,
+                "title": None,
+                "description": None,
+                "payload": {},
+                "rawSelection": _ensure_dict(message.get(mt)) or message,
+            }, "interactive_unknown"
+        return None, None
+
+    base = {
+        "interactionType": interaction_type,
+        "id": selected_id,
+        "title": title,
+        "description": description,
+        "payload": {k: v for k, v in payload.items() if v is not None},
+        "rawSelection": raw_selection,
+    }
+    has_semantic_selection = bool(selected_id or title or description)
+    subtype = "interactive_reply" if interaction_type in {"button", "list", "template", "flow"} and has_semantic_selection else "interactive_unknown"
+    if mt in {"interactiveMessage", "templateMessage", "hydratedTemplate"}:
+        subtype = "interactive_message"
+    return base, subtype
+
+
+def _extract_interactive_origin(context_info: dict[str, Any]) -> dict[str, Any] | None:
+    quoted_message = _ensure_dict(context_info.get("quotedMessage"))
+    if not quoted_message:
+        return None
+    quoted_type = str(next(iter(quoted_message.keys()), ""))
+    if quoted_type not in {
+        "buttonsMessage",
+        "listMessage",
+        "templateMessage",
+        "interactiveMessage",
+        "hydratedTemplate",
+    }:
+        return None
+    return {
+        "messageType": quoted_type,
+        "raw": quoted_message,
+    }
 
 
 def _extract_quoted_summary(context_info: dict[str, Any]) -> dict[str, Any] | None:
@@ -308,11 +598,14 @@ def _build_chat_context(data: dict[str, Any], instance: Any) -> dict[str, Any]:
     participant = str(_first(data, ("key", "participant")) or "")
     is_group = remote_jid.endswith("@g.us")
     sender = participant if is_group and participant else remote_jid
+    participant_phone = _phone_from_jid(participant) if participant else None
     return {
         "jid": remote_jid or None,
         "isGroup": is_group,
         "groupId": remote_jid if is_group else None,
         "participant": participant or None,
+        "participantPhone": participant_phone,
+        "participantName": data.get("pushName"),
         "sender": sender or None,
         "instance": instance,
     }
@@ -336,6 +629,8 @@ def _build_context_and_metadata(data: dict[str, Any], message: dict[str, Any], m
         "quoted": quoted,
         "mentions": mentions,
         "chat": chat,
+        "contextInfo": context_info or None,
+        "interactiveOrigin": _extract_interactive_origin(context_info),
     }
     metadata = {
         "isReply": is_reply,
@@ -349,6 +644,7 @@ def _build_context_and_metadata(data: dict[str, Any], message: dict[str, Any], m
         "businessForwardInfo": context_info.get("businessForwardInfo") if has_business_forward else None,
         "messageTimestamp": data.get("messageTimestamp"),
     }
+    metadata.update(_extract_special_flags(message, message_type, data, context_info))
     return context, metadata
 
 
@@ -385,6 +681,9 @@ def normalize_webhook(payload: dict[str, Any]) -> dict[str, Any]:
         return {**base, "layer": "technical", "reason": f"ignored_message_type:{message_type_lower}"}
 
     kind = _guess_kind(message, message_type)
+    interaction, interaction_subtype = _extract_interaction(message, message_type)
+    if interaction_subtype:
+        kind = interaction_subtype
     is_unknown_fallback = kind not in BUSINESS_MESSAGE_TYPES
 
     text = _extract_text(message)
@@ -393,9 +692,26 @@ def normalize_webhook(payload: dict[str, Any]) -> dict[str, Any]:
     remote_jid = _first(data, ("key", "remoteJid"))
     normalized_subtype = kind if not is_unknown_fallback else "unknown"
     context, metadata = _build_context_and_metadata(data, message, message_type, payload.get("instance"), from_me)
+    reaction_content, reaction_target, reaction_meta = _extract_reaction(message)
+    location_content, location_meta = _extract_location(message)
+    contacts = _extract_contacts(message)
+    poll_content, poll_context, poll_meta = _extract_poll(message, message_type)
     normalized_content: Any = {"text": text} if text is not None else {"text": ""}
     if is_unknown_fallback:
         normalized_content = {"text": "[Unsupported message type]"}
+    elif interaction and (interaction.get("title") or interaction.get("id")):
+        normalized_content = {
+            "text": interaction.get("title") or interaction.get("id") or "",
+            "interaction": interaction,
+        }
+    elif kind == "reaction":
+        normalized_content = reaction_content or {"emoji": None}
+    elif kind == "location":
+        normalized_content = location_content or {}
+    elif kind == "contact":
+        normalized_content = {"contacts": contacts}
+    elif kind in {"poll_create", "poll_update"}:
+        normalized_content = poll_content or {}
 
     normalized = {
         **base,
@@ -414,8 +730,22 @@ def normalize_webhook(payload: dict[str, Any]) -> dict[str, Any]:
         "fromBot": False,
         "forwarding": {"status": "pending"},
         "error": None,
-        "metadata": {**metadata, "unknownTypeDetected": is_unknown_fallback},
-        "context": context,
+        "metadata": {
+            **metadata,
+            **reaction_meta,
+            **location_meta,
+            **poll_meta,
+            "hasLocation": bool(location_content),
+            "hasContacts": bool(contacts),
+            "hasPoll": bool(poll_content),
+            "unknownTypeDetected": is_unknown_fallback,
+        },
+        "interaction": interaction,
+        "context": {
+            **context,
+            "targetMessage": reaction_target,
+            **({"targetPollId": poll_context.get("targetPollId")} if poll_context and poll_context.get("targetPollId") else {}),
+        },
         "message": {
             "id": _first(data, ("key", "id")),
             "from": remote_jid,
@@ -448,6 +778,15 @@ def save_raw_event(event: dict[str, Any]) -> None:
 def save_event(normalized: dict[str, Any]) -> None:
     if normalized.get("layer") != "business":
         return
+    dedupe_key = _event_dedupe_key(normalized)
+    if dedupe_key and dedupe_key in _business_event_keys:
+        return
+    if dedupe_key:
+        _business_event_keys_order.append(dedupe_key)
+        _business_event_keys.add(dedupe_key)
+        while len(_business_event_keys_order) > _business_event_keys_max:
+            old = _business_event_keys_order.popleft()
+            _business_event_keys.discard(old)
     _business_events.appendleft(normalized)
     media = normalized.get("media")
     message = normalized.get("message") or {}
@@ -458,6 +797,18 @@ def save_event(normalized: dict[str, Any]) -> None:
             "messageId": message.get("id"),
             "savedAt": int(time.time()),
         }
+
+
+def _event_dedupe_key(normalized: dict[str, Any]) -> str | None:
+    message = normalized.get("message") if isinstance(normalized.get("message"), dict) else {}
+    msg_id = str(message.get("id") or normalized.get("messageId") or "").strip()
+    if not msg_id:
+        return None
+    instance = str(normalized.get("instance") or "").strip()
+    event = str(normalized.get("event") or "").strip()
+    direction = str(normalized.get("direction") or "").strip()
+    subtype = str(normalized.get("subtype") or normalized.get("messageType") or "").strip()
+    return "|".join([instance, event, msg_id, direction, subtype])
 
 
 def save_pipeline_event(

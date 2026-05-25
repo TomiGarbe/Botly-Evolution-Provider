@@ -17,5 +17,5 @@ if [[ "$confirm" != "si" ]]; then
 fi
 
 echo "▼ Bajando servicios y borrando volúmenes..."
-docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" down -v
+docker compose -p evolution -f "$COMPOSE_FILE" --env-file "$ENV_FILE" down -v
 echo "✓ Entorno reseteado."

@@ -4,30 +4,22 @@ Evolution hace POST aca, el gateway lo procesa y lo reenvia al bot.
 """
 
 import asyncio
-import time
 import uuid
-import re
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.services.instance_webhooks import (
-    build_auth_headers,
     list_enabled_webhooks_for_dispatch,
-    mark_dispatch_result,
-    mask_headers_for_log,
+    list_instance_webhooks,
 )
-from app.services.normalization import list_events, normalize_webhook, save_event, save_pipeline_event, save_raw_event
-from app.services.reliability import (
-    conversation_id,
-    inbound_dedupe,
-    is_flood,
-    looks_like_outbound_echo,
-    message_fingerprint,
-)
+from app.services.event_pipeline import process_incoming_webhook, snapshot_pipeline_metrics
+from app.services.normalization import list_events, normalize_webhook, save_event, save_pipeline_event
+from app.services.webhook_delivery import dispatch_webhook_with_retry
+from app.services.webhook_delivery import diagnose_webhook_target
+from app.services.evolution_auth import auth_runtime_snapshot, extract_evolution_auth, validate_evolution_auth
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
@@ -60,72 +52,51 @@ async def shutdown_forward_workers(timeout_s: float = 3.0) -> None:
 
 
 async def _dispatch_single_webhook(payload: dict[str, Any], request_id: str, item: dict[str, Any]) -> None:
-    instance_name = str(payload.get("instance") or "")
-    webhook_id = str(item.get("id") or "")
-    url = str(item.get("url") or "")
-    headers = {"Content-Type": "application/json", **build_auth_headers(item)}
-    start = time.perf_counter()
-
-    logger.info(
-        "webhook_dispatch_start",
+    dispatch_id = f"disp_{request_id}_{str(item.get('id') or '')[:6]}"
+    dispatch_payload = {
+        **payload,
+        "dispatchId": dispatch_id,
+    }
+    save_pipeline_event(
+        stage="dispatch_select_webhook",
+        status="ok",
+        instance=str(payload.get("instance") or ""),
+        message_id=(payload.get("message") or {}).get("id"),
+        conversation_id=(payload.get("meta") or {}).get("conversationId"),
         request_id=request_id,
-        instance=instance_name,
-        webhook_id=webhook_id,
-        url=url,
-        headers=mask_headers_for_log(headers),
+        details={"webhookId": item.get("id"), "dispatchId": dispatch_id},
     )
-
-    timeout = httpx.Timeout(
-        connect=min(5.0, float(settings.instance_webhook_timeout)),
-        read=float(settings.instance_webhook_timeout),
-        write=min(8.0, float(settings.instance_webhook_timeout)),
-        pool=2.0,
+    result = await dispatch_webhook_with_retry(payload=dispatch_payload, request_id=request_id, item=item)
+    save_pipeline_event(
+        stage="dispatch_result",
+        status="ok" if result.get("ok") else str(result.get("status") or "failed"),
+        instance=str(payload.get("instance") or ""),
+        message_id=(payload.get("message") or {}).get("id"),
+        conversation_id=(payload.get("meta") or {}).get("conversationId"),
+        request_id=request_id,
+        details={
+            "webhookId": item.get("id"),
+            "dispatchId": dispatch_id,
+            "statusCode": result.get("statusCode"),
+            "status": result.get("status"),
+            "retriesUsed": result.get("retriesUsed"),
+        },
     )
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-        latency_ms = round((time.perf_counter() - start) * 1000, 2)
-        if resp.status_code < 200 or resp.status_code >= 300:
-            err = (resp.text or "")[:220]
-            status_value = f"http_{resp.status_code}"
-            mark_dispatch_result(instance_name, webhook_id, status=status_value, error=err)
-            logger.warning(
-                "webhook_dispatch_non_2xx",
-                request_id=request_id,
-                instance=instance_name,
-                webhook_id=webhook_id,
-                status=resp.status_code,
-                latency_ms=latency_ms,
-                error=err,
-            )
-            return
-
-        mark_dispatch_result(instance_name, webhook_id, status=f"ok_{resp.status_code}", error=None)
-        logger.info(
-            "webhook_dispatch_success",
+    if not result.get("ok"):
+        save_pipeline_event(
+            stage="dispatch",
+            status="failed",
+            instance=str(payload.get("instance") or ""),
+            message_id=(payload.get("message") or {}).get("id"),
+            conversation_id=(payload.get("meta") or {}).get("conversationId"),
             request_id=request_id,
-            instance=instance_name,
-            webhook_id=webhook_id,
-            status=resp.status_code,
-            latency_ms=latency_ms,
-        )
-    except httpx.TimeoutException as exc:
-        mark_dispatch_result(instance_name, webhook_id, status="timeout", error=str(exc))
-        logger.warning(
-            "webhook_dispatch_timeout",
-            request_id=request_id,
-            instance=instance_name,
-            webhook_id=webhook_id,
-            error=str(exc),
-        )
-    except Exception as exc:
-        mark_dispatch_result(instance_name, webhook_id, status="connection_fail", error=str(exc))
-        logger.error(
-            "webhook_dispatch_connection_fail",
-            request_id=request_id,
-            instance=instance_name,
-            webhook_id=webhook_id,
-            error=str(exc),
+            details={
+                "webhookId": item.get("id"),
+                "statusCode": result.get("statusCode"),
+                "status": result.get("status"),
+                "retriesUsed": result.get("retriesUsed"),
+                "error": result.get("error"),
+            },
         )
 
 
@@ -141,6 +112,7 @@ async def _forward_to_instance_webhooks(payload: dict[str, Any], request_id: str
                 "authConfig": {},
                 "customHeaders": {},
                 "enabled": True,
+                "eventFilters": {"business": True, "transport": False, "operational": False},
             }
         ]
 
@@ -153,11 +125,30 @@ async def _forward_to_instance_webhooks(payload: dict[str, Any], request_id: str
             conversation_id=(payload.get("meta") or {}).get("conversationId"),
             request_id=request_id,
         )
-        logger.warning("webhook_dispatch_skipped_no_target", request_id=request_id, instance=instance_name)
+        logger.warning("bot_webhook_dispatch_skipped_no_target", request_id=request_id, instance=instance_name)
         return
 
     async with _forward_semaphore:
-        await asyncio.gather(*[_dispatch_single_webhook(payload, request_id, hook) for hook in webhooks], return_exceptions=True)
+        results = await asyncio.gather(*[_dispatch_single_webhook(payload, request_id, hook) for hook in webhooks], return_exceptions=True)
+        for idx, result in enumerate(results):
+            if isinstance(result, Exception):
+                hook = webhooks[idx] if idx < len(webhooks) else {}
+                logger.error(
+                    "webhook_dispatch_worker_exception",
+                    request_id=request_id,
+                    instance=instance_name,
+                    webhook_id=hook.get("id"),
+                    error=str(result),
+                )
+                save_pipeline_event(
+                    stage="dispatch_worker_exception",
+                    status="error",
+                    instance=instance_name,
+                    message_id=(payload.get("message") or {}).get("id"),
+                    conversation_id=(payload.get("meta") or {}).get("conversationId"),
+                    request_id=request_id,
+                    details={"webhookId": hook.get("id"), "error": str(result)[:220]},
+                )
 
 
 def _to_bot_payload(normalized: dict[str, Any]) -> dict[str, Any] | None:
@@ -191,8 +182,20 @@ def _to_bot_payload(normalized: dict[str, Any]) -> dict[str, Any] | None:
         "status": normalized.get("status"),
         "metadata": normalized.get("metadata"),
         "context": normalized.get("context"),
+        "interaction": normalized.get("interaction"),
+        "eventType": normalized.get("eventType"),
+        "category": normalized.get("category"),
+        "transport": normalized.get("transport"),
+        "operational": normalized.get("operational"),
         "raw": normalized.get("raw"),
         "meta": normalized.get("meta"),
+        "trace": {
+            "requestId": (normalized.get("meta") or {}).get("requestId"),
+            "conversationId": (normalized.get("meta") or {}).get("conversationId"),
+            "messageId": (normalized.get("message") or {}).get("id"),
+            "instance": normalized.get("instance"),
+            "retryAttempt": 0,
+        },
     }
 
 
@@ -207,161 +210,149 @@ async def receive_webhook(request: Request):
         payload: dict[str, Any] = await request.json()
     except Exception:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Body JSON invalido")
-
-    expected_key = (settings.evolution_api_key or "").strip()
-    header_candidates = [
-        request.headers.get("apikey"),
-        request.headers.get("x-api-key"),
-        request.headers.get("authorization"),
-    ]
-    provided_key = ""
-    provided_source = "none"
-    for idx, candidate in enumerate(header_candidates):
-        if not candidate:
-            continue
-        raw = str(candidate).strip()
-        value = raw
-        if idx == 2:
-            value = re.sub(r"^Bearer\s+", "", raw, flags=re.IGNORECASE).strip()
-        if value:
-            provided_key = value
-            provided_source = ("apikey", "x-api-key", "authorization")[idx]
-            break
-    if not provided_key:
-        body_key = str(payload.get("apikey") or "").strip()
-        if body_key:
-            provided_key = body_key
-            provided_source = "payload.apikey"
-
-    if expected_key and not provided_key:
-        logger.warning("webhook_auth_missing", instance=payload.get("instance"), source=provided_source)
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Webhook auth missing")
-
-    if expected_key and provided_key != expected_key:
-        logger.warning(
-            "webhook_auth_failed",
-            instance=payload.get("instance"),
-            source=provided_source,
-            received_prefix=provided_key[:8],
-        )
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Webhook auth failed")
-
-    if expected_key:
-        logger.info("webhook_auth_success", instance=payload.get("instance"), source=provided_source)
-    else:
-        logger.warning("webhook_auth_disabled_missing_expected_key", instance=payload.get("instance"))
-
-    raw_event = str(payload.get("event", "UNKNOWN"))
-    instance = str(payload.get("instance", "unknown"))
     request_id = str(uuid.uuid4())[:12]
+    instance = str(payload.get("instance", "unknown"))
+    source_ip = request.client.host if request.client else "unknown"
+    header_presence = {
+        "apikey": bool(request.headers.get("apikey")),
+        "x_api_key": bool(request.headers.get("x-api-key")),
+        "authorization": bool(request.headers.get("authorization")),
+    }
+    logger.info(
+        "evolution_webhook_received",
+        request_id=request_id,
+        instance=instance,
+        source_ip=source_ip,
+        source_event=payload.get("event"),
+        header_presence=header_presence,
+    )
 
-    logger.debug("webhook_received", request_id=request_id, source_event=raw_event, instance=instance)
+    extracted = extract_evolution_auth(request.headers, payload)
+    provided_key = extracted["providedKey"]
+    provided_source = extracted["source"]
+    logger.info(
+        "evolution_auth_extracted",
+        request_id=request_id,
+        instance=instance,
+        auth_source=provided_source,
+        received_prefix=provided_key[:8] if provided_key else "",
+        normalized=extracted["normalized"],
+    )
 
-    normalized = normalize_webhook(payload)
-    event = str(normalized.get("event") or raw_event)
-    save_raw_event({"requestId": request_id, "payload": payload, "normalized": normalized, "timestamp": int(time.time() * 1000)})
-    if normalized.get("layer") == "technical":
+    auth_validation = await validate_evolution_auth(payload, provided_key)
+    logger.info(
+        "evolution_auth_validation",
+        request_id=request_id,
+        instance=instance,
+        auth_source=provided_source,
+        expected_global_prefix=auth_validation["expectedGlobalPrefix"],
+        expected_instance_prefix=auth_validation["expectedInstancePrefix"],
+        received_prefix=auth_validation["receivedPrefix"],
+        comparison_mode="global_or_instance",
+        result="ok" if auth_validation["accepted"] else "fail",
+        accepted_mode=auth_validation["mode"],
+    )
+    save_pipeline_event(
+        stage="evolution_auth",
+        status="ok" if auth_validation["accepted"] else "fail",
+        instance=instance,
+        request_id=request_id,
+        event=str(payload.get("event") or "UNKNOWN"),
+        details={
+            "source": provided_source,
+            "receivedPrefix": auth_validation["receivedPrefix"],
+            "expectedGlobalPrefix": auth_validation["expectedGlobalPrefix"],
+            "expectedInstancePrefix": auth_validation["expectedInstancePrefix"],
+            "acceptedMode": auth_validation["mode"],
+        },
+    )
+
+    if not auth_validation["accepted"]:
+        if settings.allow_insecure_evolution_webhooks:
+            logger.warning(
+                "evolution_webhook_auth_insecure_bypass",
+                request_id=request_id,
+                instance=instance,
+                source=provided_source,
+                received_prefix=auth_validation["receivedPrefix"],
+            )
+            save_pipeline_event(
+                stage="evolution_auth",
+                status="insecure_bypass",
+                instance=instance,
+                request_id=request_id,
+                details={"source": provided_source, "receivedPrefix": auth_validation["receivedPrefix"]},
+            )
+        elif not provided_key:
+            logger.warning("evolution_webhook_auth_missing", instance=instance, source=provided_source)
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Webhook auth missing")
+        else:
+            logger.warning(
+                "evolution_webhook_auth_failed",
+                instance=instance,
+                source=provided_source,
+                received_prefix=auth_validation["receivedPrefix"],
+                expected_global_prefix=auth_validation["expectedGlobalPrefix"],
+                expected_instance_prefix=auth_validation["expectedInstancePrefix"],
+            )
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Webhook auth failed")
+    else:
+        logger.info("evolution_webhook_auth_success", instance=instance, source=provided_source, mode=auth_validation["mode"])
+
+    try:
+        normalized_timeline = normalize_webhook(payload)
+        if normalized_timeline.get("layer") == "business":
+            save_event(normalized_timeline)
+            logger.info(
+                "[TIMELINE][INGEST] event persisted from evolution",
+                request_id=request_id,
+                instance=instance,
+                source_event=payload.get("event"),
+                direction=normalized_timeline.get("direction"),
+                subtype=normalized_timeline.get("subtype"),
+                message_id=((normalized_timeline.get("message") or {}).get("id")),
+            )
+        else:
+            logger.info(
+                "[TIMELINE][INGEST] filtered non-business event",
+                request_id=request_id,
+                instance=instance,
+                source_event=payload.get("event"),
+                reason=normalized_timeline.get("reason"),
+            )
+    except Exception as exc:
+        logger.warning(
+            "[TIMELINE][INGEST] normalize failed",
+            request_id=request_id,
+            instance=instance,
+            source_event=payload.get("event"),
+            error=str(exc),
+        )
+
+    logger.debug("webhook_received", request_id=request_id, source_event=payload.get("event"), instance=instance)
+    logger.info("[OUTBOUND][WEBHOOK] evolution webhook received", request_id=request_id, instance=instance, source_event=payload.get("event"))
+    pipeline_result = process_incoming_webhook(payload, request_id)
+    normalized = pipeline_result.get("normalized") or {}
+    event = str(normalized.get("event") or payload.get("event") or "UNKNOWN")
+
+    if pipeline_result.get("status") == "ignored_technical":
         logger.debug(
             "webhook_technical_ignored",
             request_id=request_id,
-            source_event=normalized.get("sourceEvent") or raw_event,
+            source_event=normalized.get("sourceEvent") or payload.get("event"),
             instance=instance,
             reason=normalized.get("reason"),
         )
         return {"status": "ignored_technical"}
-
-    save_pipeline_event(
-        stage="webhook_received",
-        status="ok",
-        instance=instance,
-        request_id=request_id,
-        event=event,
-    )
+    if pipeline_result.get("status") == "normalize_error":
+        logger.error("webhook_normalize_error", request_id=request_id, instance=instance)
+        return {"status": "normalize_error"}
+    if pipeline_result.get("status") in {"duplicate", "duplicate_fp", "echo_filtered", "throttled"}:
+        return {"status": pipeline_result.get("status")}
 
     message = normalized.get("message") or {}
     msg_id = str(message.get("id") or "")
-    conv_id = conversation_id(instance, message.get("from"))
-    normalized["meta"] = {"requestId": request_id, "conversationId": conv_id}
-
-    if event in {"MESSAGES_UPSERT", "SEND_MESSAGE"}:
-        if msg_id and inbound_dedupe.exists(msg_id):
-            save_pipeline_event(
-                stage="dedupe",
-                status="skipped_duplicate_id",
-                instance=instance,
-                message_id=msg_id,
-                conversation_id=conv_id,
-                request_id=request_id,
-            )
-            logger.warning("duplicate_message_ignored", request_id=request_id, instance=instance, message_id=msg_id)
-            return {"status": "duplicate"}
-        if msg_id:
-            inbound_dedupe.put(msg_id)
-
-        fp = message_fingerprint(
-            instance=instance,
-            remote_jid=message.get("from"),
-            kind=message.get("kind"),
-            text=message.get("text"),
-            media_id=(normalized.get("media") or {}).get("id") if normalized.get("media") else None,
-        )
-        if inbound_dedupe.exists(fp):
-            save_pipeline_event(
-                stage="dedupe",
-                status="skipped_duplicate_fingerprint",
-                instance=instance,
-                message_id=msg_id,
-                conversation_id=conv_id,
-                request_id=request_id,
-            )
-            logger.warning("duplicate_fingerprint_ignored", request_id=request_id, instance=instance, message_id=msg_id)
-            return {"status": "duplicate_fp"}
-        inbound_dedupe.put(fp)
-
-        is_from_me = bool(message.get("fromMe"))
-        if is_from_me:
-            normalized["status"] = "sent"
-            normalized["forwarding"] = {"status": "not_forwarded_from_me"}
-            normalized["fromBot"] = False
-
-        payload_text = str(message.get("text") or (normalized.get("media") or {}).get("caption") or "")
-        if (not is_from_me) and looks_like_outbound_echo(
-            instance, message.get("from"), str(message.get("kind") or "unknown"), payload_text
-        ):
-            save_pipeline_event(
-                stage="anti_loop",
-                status="skipped_outbound_echo",
-                instance=instance,
-                message_id=msg_id,
-                conversation_id=conv_id,
-                request_id=request_id,
-            )
-            logger.warning("outbound_echo_ignored", request_id=request_id, instance=instance, message_id=msg_id)
-            return {"status": "echo_filtered"}
-
-        flooded, count = is_flood(conv_id)
-        if flooded:
-            save_pipeline_event(
-                stage="flood_guard",
-                status="throttled",
-                instance=instance,
-                message_id=msg_id,
-                conversation_id=conv_id,
-                request_id=request_id,
-                details={"messagesInWindow": count},
-            )
-            logger.warning("conversation_throttled", request_id=request_id, instance=instance, message_id=msg_id, messages_in_window=count)
-            return {"status": "throttled"}
-
-    save_event(normalized)
-    save_pipeline_event(
-        stage="normalized",
-        status="ok",
-        instance=instance,
-        message_id=msg_id or None,
-        conversation_id=conv_id,
-        request_id=request_id,
-    )
+    conv_id = str((normalized.get("meta") or {}).get("conversationId") or "")
 
     normalized_kind = (normalized.get("message") or {}).get("kind")
     logger.info(
@@ -382,6 +373,24 @@ async def receive_webhook(request: Request):
         quoted_type=(((normalized.get("context") or {}).get("quoted")) or {}).get("type"),
         quoted_preview=(((normalized.get("context") or {}).get("quoted")) or {}).get("preview"),
         unknown_type_detected=bool((normalized.get("metadata") or {}).get("unknownTypeDetected")),
+        interaction_type=((normalized.get("interaction") or {}).get("interactionType")),
+        selected_id=((normalized.get("interaction") or {}).get("id")),
+        selected_title=((normalized.get("interaction") or {}).get("title")),
+        rich_subtype=normalized.get("subtype"),
+        has_location=bool(((normalized.get("metadata") or {}).get("hasLocation"))),
+        has_contacts=bool(((normalized.get("metadata") or {}).get("hasContacts"))),
+        has_poll=bool(((normalized.get("metadata") or {}).get("hasPoll"))),
+        reaction_emoji=((normalized.get("content") or {}).get("emoji")) if isinstance(normalized.get("content"), dict) else None,
+        poll_option_count=((normalized.get("metadata") or {}).get("pollOptionCount")),
+        special_flags={
+            "ephemeral": (normalized.get("metadata") or {}).get("ephemeral"),
+            "edited": (normalized.get("metadata") or {}).get("edited"),
+            "revoked": (normalized.get("metadata") or {}).get("revoked"),
+            "fromBusiness": (normalized.get("metadata") or {}).get("fromBusiness"),
+            "newsletter": (normalized.get("metadata") or {}).get("newsletter"),
+            "statusMessage": (normalized.get("metadata") or {}).get("statusMessage"),
+        },
+        pipeline_trace=(normalized.get("operational") or {}).get("pipeline"),
     )
 
     bot_payload = _to_bot_payload(normalized)
@@ -423,6 +432,24 @@ async def receive_webhook(request: Request):
 
     task = asyncio.create_task(_forward_to_instance_webhooks(bot_payload, request_id))
     _track_background_task(task)
+    logger.info(
+        "[CHAT][EMIT] queued forward event",
+        request_id=request_id,
+        instance=instance,
+        message_id=msg_id or None,
+        conversation_id=conv_id or None,
+        direction=normalized.get("direction"),
+        subtype=normalized.get("subtype"),
+    )
+    save_pipeline_event(
+        stage="dispatch",
+        status="queued",
+        instance=instance,
+        message_id=msg_id or None,
+        conversation_id=conv_id or None,
+        request_id=request_id,
+        details={"queueSize": len(_forward_tasks)},
+    )
 
     return {"status": "ok"}
 
@@ -437,3 +464,50 @@ async def get_events(request: Request, instance: str | None = None, limit: int =
             raise HTTPException(status_code=403, detail="Token no autorizado para esta instancia")
     safe_limit = max(1, min(limit, 500))
     return {"items": list_events(instance=instance, limit=safe_limit)}
+
+
+@router.get("/pipeline-metrics")
+async def get_pipeline_metrics():
+    return snapshot_pipeline_metrics()
+
+
+@router.get("/dispatch-metrics")
+async def get_dispatch_metrics(instance: str | None = None):
+    if instance:
+        items = list_instance_webhooks(instance, reveal_secrets=False)
+        return {"instance": instance, "webhooks": items}
+    events = list_events(instance=None, limit=300)
+    by_instance: dict[str, dict[str, Any]] = {}
+    for event in events:
+        inst = str(event.get("instance") or "unknown")
+        if inst not in by_instance:
+            by_instance[inst] = {"events": 0, "dispatchFailures": 0, "dispatchQueued": 0}
+        by_instance[inst]["events"] += 1
+        pipeline = event.get("pipeline") if isinstance(event.get("pipeline"), dict) else {}
+        stage = str(pipeline.get("stage") or "")
+        status = str(pipeline.get("status") or "")
+        if stage == "dispatch" and status == "failed":
+            by_instance[inst]["dispatchFailures"] += 1
+        if stage == "dispatch" and status == "queued":
+            by_instance[inst]["dispatchQueued"] += 1
+    return {"instances": by_instance}
+
+
+@router.get("/debug/webhook-connectivity")
+async def debug_webhook_connectivity(url: str = "http://host.docker.internal:8000/"):
+    logger.info("webhook_connectivity_debug_start", url=url)
+    result = await diagnose_webhook_target(url=url, timeout_s=8.0)
+    logger.info(
+        "webhook_connectivity_debug_result",
+        url=url,
+        dns_ok=result.get("dns", {}).get("resolved"),
+        tcp_ok=result.get("tcp", {}).get("ok"),
+        http_ok=result.get("http", {}).get("ok"),
+        http_status=result.get("http", {}).get("statusCode"),
+    )
+    return result
+
+
+@router.get("/evolution-auth/runtime")
+async def get_evolution_auth_runtime():
+    return await auth_runtime_snapshot()

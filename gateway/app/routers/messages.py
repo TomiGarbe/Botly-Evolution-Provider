@@ -20,7 +20,7 @@ from app.models.requests import (
 )
 from app.services import evolution
 from app.services.media import consume_uploaded_file, file_to_base64, get_uploaded_file
-from app.services.normalization import save_business_event, save_pipeline_event
+from app.services.normalization import save_business_event, save_event, save_pipeline_event
 from app.services.reliability import mark_outbound
 
 logger = get_logger(__name__)
@@ -104,6 +104,49 @@ def _log_message_success(instance_name: str, msg_type: str, number: str) -> None
     logger.info("message_send_success", instance=instance_name, type=msg_type, number=number)
 
 
+def _persist_local_outbound_event(
+    *,
+    instance_name: str,
+    number: str,
+    msg_type: str,
+    text: str | None = None,
+    caption: str | None = None,
+    media: dict[str, Any] | None = None,
+    evolution_result: dict[str, Any] | None = None,
+) -> None:
+    content_text = (text or caption or "").strip()
+    message_id = str(
+        ((evolution_result or {}).get("key") or {}).get("id")
+        or ((evolution_result or {}).get("message") or {}).get("key", {}).get("id")
+        or f"local_{uuid.uuid4().hex[:12]}"
+    )
+    event = {
+        "id": str(uuid.uuid4())[:16],
+        "layer": "business",
+        "event": "LOCAL_OUTBOUND_SEND",
+        "instance": instance_name,
+        "timestamp": int(time.time() * 1000),
+        "direction": "outbound",
+        "type": "message",
+        "subtype": msg_type,
+        "messageType": msg_type,
+        "sender": instance_name,
+        "recipient": number,
+        "content": {"text": content_text} if content_text else {"text": ""},
+        "text": content_text,
+        "status": "sent",
+        "fromMe": True,
+        "fromBot": False,
+        "forwarding": {"status": "local_api_send"},
+        "error": None,
+        "message": {"id": message_id, "from": f"{number}@s.whatsapp.net", "fromMe": True, "kind": msg_type, "text": content_text},
+        "media": media,
+        "raw": {"source": "gateway_send_api", "evolutionResult": evolution_result or {}},
+    }
+    save_event(event)
+    logger.info("[OUTBOUND][PERSIST] local outbound persisted", instance=instance_name, number=number, message_type=msg_type, message_id=message_id)
+
+
 async def _send_message_unified(instance_name: str, request: Request):
     instance_name = _validate_instance_name(instance_name)
     settings = get_settings()
@@ -127,7 +170,15 @@ async def _send_message_unified(instance_name: str, request: Request):
                     logger.warning("invalid_payload", instance=instance_name, reason="missing_text")
                     raise HTTPException(status_code=422, detail="text es obligatorio para type=text")
                 _log_message_start(instance_name, "text", number)
+                logger.info("[OUTBOUND][SEND] gateway send request", instance=instance_name, number=number, message_type="text")
                 result = await evolution.send_text(instance_name, number, text.strip())
+                _persist_local_outbound_event(
+                    instance_name=instance_name,
+                    number=number,
+                    msg_type="text",
+                    text=text.strip(),
+                    evolution_result=result if isinstance(result, dict) else {},
+                )
                 _log_message_success(instance_name, "text", number)
                 return result
 
@@ -155,6 +206,20 @@ async def _send_message_unified(instance_name: str, request: Request):
                 file_name=(file.filename or "file.bin"),
                 caption=caption.strip(),
             )
+            _persist_local_outbound_event(
+                instance_name=instance_name,
+                number=number,
+                msg_type=normalized_media_type,
+                caption=caption.strip(),
+                media={
+                    "id": str(uuid.uuid4())[:16],
+                    "kind": normalized_media_type,
+                    "mimeType": (file.content_type or "application/octet-stream"),
+                    "fileName": (file.filename or "file.bin"),
+                    "caption": caption.strip() or None,
+                },
+                evolution_result=result if isinstance(result, dict) else {},
+            )
             _log_message_success(instance_name, normalized_media_type, number)
             return result
 
@@ -164,7 +229,15 @@ async def _send_message_unified(instance_name: str, request: Request):
 
         if msg_type == "text":
             _log_message_start(instance_name, "text", number, payload.metadata)
+            logger.info("[OUTBOUND][SEND] gateway send request", instance=instance_name, number=number, message_type="text")
             result = await evolution.send_text(instance_name, number, (payload.text or "").strip())
+            _persist_local_outbound_event(
+                instance_name=instance_name,
+                number=number,
+                msg_type="text",
+                text=(payload.text or "").strip(),
+                evolution_result=result if isinstance(result, dict) else {},
+            )
             _log_message_success(instance_name, "text", number)
             return result
 
@@ -183,6 +256,20 @@ async def _send_message_unified(instance_name: str, request: Request):
             mimetype="application/octet-stream",
             file_name="file.bin",
             caption=(payload.caption or "").strip(),
+        )
+        _persist_local_outbound_event(
+            instance_name=instance_name,
+            number=number,
+            msg_type=normalized_media_type,
+            caption=(payload.caption or "").strip(),
+            media={
+                "id": str(uuid.uuid4())[:16],
+                "kind": normalized_media_type,
+                "mimeType": "application/octet-stream",
+                "fileName": "file.bin",
+                "caption": (payload.caption or "").strip() or None,
+            },
+            evolution_result=result if isinstance(result, dict) else {},
         )
         _log_message_success(instance_name, normalized_media_type, number)
         return result

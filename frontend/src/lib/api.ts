@@ -1,5 +1,5 @@
 import type { GatewayConfig } from './config'
-import type { Instance, InstanceApiKey, InstanceState, QRResponse, InstanceWebhook, WebhookAuthType } from '../types'
+import type { Instance, InstanceApiKey, InstanceState, QRResponse, InstanceWebhook, WebhookAuthType, WebhookDispatchLog } from '../types'
 
 const DEFAULT_TIMEOUT_MS = 10000
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504])
@@ -213,6 +213,18 @@ export const api = {
     test: (cfg: GatewayConfig, instanceName: string, webhookId: string) => {
       assertInstanceName(instanceName)
       return request<{ ok: boolean; status: number; error?: string }>(cfg, 'POST', `/instances/${instanceName}/webhooks/${encodeURIComponent(webhookId)}/test`)
+    },
+    dispatches: (cfg: GatewayConfig, instanceName: string, webhookId: string, limit = 20) => {
+      assertInstanceName(instanceName)
+      return request<{ items: WebhookDispatchLog[] }>(
+        cfg,
+        'GET',
+        `/instances/${instanceName}/webhooks/${encodeURIComponent(webhookId)}/dispatches?limit=${Math.max(1, Math.min(limit, 100))}`
+      )
+    },
+    diagnose: (cfg: GatewayConfig, instanceName: string, webhookId: string) => {
+      assertInstanceName(instanceName)
+      return request<Record<string, unknown>>(cfg, 'POST', `/instances/${instanceName}/webhooks/${encodeURIComponent(webhookId)}/diagnose`)
     },
   },
 

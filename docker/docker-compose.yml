@@ -1,3 +1,5 @@
+name: evolution
+
 services:
   evolution:
     image: evoapicloud/evolution-api:v2.3.7
@@ -121,6 +123,11 @@ services:
       EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
       BOT_WEBHOOK_URL: ${BOT_WEBHOOK_URL:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      INSTANCE_API_KEYS_PATH: /var/lib/botly/instance_api_keys.json
+      INSTANCE_WEBHOOKS_PATH: /var/lib/botly/instance_webhooks.json
+      MEDIA_CACHE_DIR: /var/lib/botly/media_cache
+    volumes:
+      - gateway_data:/var/lib/botly
     depends_on:
       evolution:
         condition: service_started
@@ -139,11 +146,17 @@ services:
 
 volumes:
   evolution_instances:
+    name: evolution_instances_data
   postgres_data:
+    name: evolution_postgres_data
   redis_data:
+    name: evolution_redis_data
+  gateway_data:
+    name: evolution_gateway_data
 
 networks:
   evolution_net:
+    name: evolution_net
     driver: bridge
     driver_opts:
       # WSL2 en Windows tiene overhead extra — MTU 1500 fragmenta paquetes grandes

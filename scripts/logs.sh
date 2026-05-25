@@ -10,4 +10,4 @@ COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
 ENV_FILE="$REPO_ROOT/config/.env"
 SERVICE="${1:-}"
 
-docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" logs -f --tail=100 $SERVICE
+docker compose -p evolution -f "$COMPOSE_FILE" --env-file "$ENV_FILE" logs -f --tail=100 $SERVICE

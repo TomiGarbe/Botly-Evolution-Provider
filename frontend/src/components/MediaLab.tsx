@@ -29,6 +29,9 @@ type ConsoleItem = {
   forwarding: string
   error: string
   requestId: string
+  interaction: PipelineEvent['interaction']
+  quotedPreview: string
+  badges: string[]
 }
 
 function mapEvent(item: PipelineEvent, idx: number): ConsoleItem {
@@ -41,6 +44,46 @@ function mapEvent(item: PipelineEvent, idx: number): ConsoleItem {
   const status = String(item.status ?? item.pipeline?.status ?? 'ok')
   const forwarding = String(item.forwarding?.status ?? item.pipeline?.stage ?? 'n/a')
   const error = String(item.error?.message ?? (item.details?.error as string | undefined) ?? '')
+  const contentText =
+    typeof item.text === 'string'
+      ? item.text
+      : typeof item.content === 'string'
+        ? item.content
+        : typeof item.content === 'object' && item.content && 'text' in (item.content as Record<string, unknown>)
+          ? String((item.content as Record<string, unknown>).text ?? '')
+          : ''
+  const selectedTitle = String(item.interaction?.title ?? '').trim()
+  const selectedId = String(item.interaction?.id ?? '').trim()
+  const interactionLabel = selectedTitle || selectedId
+  const badges: string[] = []
+  if (item.metadata?.ephemeral) badges.push('ephemeral')
+  if (item.metadata?.edited) badges.push('edited')
+  if (item.metadata?.revoked) badges.push('revoked')
+  if (item.metadata?.fromBusiness) badges.push('business')
+  if (item.metadata?.newsletter) badges.push('newsletter')
+  if (item.metadata?.statusMessage) badges.push('status')
+
+  let richPreview = ''
+  if (messageType === 'reaction') {
+    const emoji = typeof item.content === 'object' && item.content ? String((item.content as Record<string, unknown>).emoji ?? '') : ''
+    const removed = Boolean(item.metadata?.removeReaction)
+    richPreview = removed ? 'Reaction removed' : `Reaction: ${emoji || '(empty)'}`
+  } else if (messageType === 'location') {
+    const c = (typeof item.content === 'object' && item.content ? (item.content as Record<string, unknown>) : {}) as Record<string, unknown>
+    const lat = c.latitude ?? '-'
+    const lon = c.longitude ?? '-'
+    richPreview = `Location: ${lat}, ${lon}${item.metadata?.liveLocation ? ' (live)' : ''}`
+  } else if (messageType === 'contact') {
+    const c = (typeof item.content === 'object' && item.content ? (item.content as Record<string, unknown>) : {}) as Record<string, unknown>
+    const contacts = Array.isArray(c.contacts) ? c.contacts : []
+    richPreview = `Contacts: ${contacts.length}`
+  } else if (messageType === 'poll_create') {
+    const c = (typeof item.content === 'object' && item.content ? (item.content as Record<string, unknown>) : {}) as Record<string, unknown>
+    richPreview = `Poll: ${String(c.title ?? '')} · options:${Array.isArray(c.options) ? c.options.length : 0}`
+  } else if (messageType === 'poll_update') {
+    const c = (typeof item.content === 'object' && item.content ? (item.content as Record<string, unknown>) : {}) as Record<string, unknown>
+    richPreview = `Poll vote update: ${Array.isArray(c.selectedOptions) ? c.selectedOptions.length : 0}`
+  }
 
   return {
     id: String(item.id ?? item.message?.id ?? `${item.timestamp}-${idx}`),
@@ -51,7 +94,7 @@ function mapEvent(item: PipelineEvent, idx: number): ConsoleItem {
     recipient: String(item.recipient ?? '-'),
     messageType,
     kind,
-    text: String(item.text ?? item.content ?? ''),
+    text: interactionLabel || richPreview || contentText,
     media: item.media,
     status,
     fromBot: Boolean(item.fromBot) || String(item.event).startsWith('FORWARD_'),
@@ -59,6 +102,9 @@ function mapEvent(item: PipelineEvent, idx: number): ConsoleItem {
     forwarding,
     error,
     requestId: String(item.meta?.requestId ?? item.pipeline?.requestId ?? ''),
+    interaction: item.interaction,
+    quotedPreview: String(item.context?.quoted?.preview ?? ''),
+    badges,
   }
 }
 
@@ -129,6 +175,7 @@ export default function MediaLab({
   const [autoScroll, setAutoScroll] = useState(true)
   const [onlyDirection, setOnlyDirection] = useState<'all' | ConsoleDirection>('all')
   const [onlyKind, setOnlyKind] = useState<'all' | EventKind>('all')
+  const [hideSystem, setHideSystem] = useState(true)
   const [onlyBot, setOnlyBot] = useState(false)
   const [onlyErrors, setOnlyErrors] = useState(false)
   const [limit, setLimit] = useState(400)
@@ -168,13 +215,27 @@ export default function MediaLab({
 
   const items = useMemo(() => {
     return allItems.filter(item => {
+      if (hideSystem && (item.direction === 'system' || item.kind === 'system')) return false
       if (onlyDirection !== 'all' && item.direction !== onlyDirection) return false
       if (onlyKind !== 'all' && item.kind !== onlyKind) return false
       if (onlyBot && !item.fromBot) return false
       if (onlyErrors && item.kind !== 'error') return false
       return true
     })
-  }, [allItems, onlyDirection, onlyKind, onlyBot, onlyErrors])
+  }, [allItems, onlyDirection, onlyKind, onlyBot, onlyErrors, hideSystem])
+
+  useEffect(() => {
+    if (!items.length) return
+    const last = items[items.length - 1]
+    console.debug('[CHAT][RENDER]', {
+      total: items.length,
+      instance: last.instance,
+      direction: last.direction,
+      messageType: last.messageType,
+      id: last.id,
+      ts: last.timestamp,
+    })
+  }, [items])
 
   useEffect(() => {
     if (!autoScroll || !listRef.current) return
@@ -460,6 +521,7 @@ export default function MediaLab({
           </select>
           <label className="text-xs text-zinc-400 flex items-center gap-1"><input type="checkbox" checked={onlyBot} onChange={e => setOnlyBot(e.target.checked)} /> bot only</label>
           <label className="text-xs text-zinc-400 flex items-center gap-1"><input type="checkbox" checked={onlyErrors} onChange={e => setOnlyErrors(e.target.checked)} /> errors only</label>
+          <label className="text-xs text-zinc-400 flex items-center gap-1"><input type="checkbox" checked={hideSystem} onChange={e => setHideSystem(e.target.checked)} /> hide system</label>
           <select value={String(limit)} onChange={e => setLimit(Number(e.target.value))} className="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-xs">
             <option value="200">200</option>
             <option value="400">400</option>
@@ -488,6 +550,17 @@ export default function MediaLab({
                 <p className="text-[11px] text-zinc-500 mt-1">
                   {item.direction.toUpperCase()} · {item.messageType} · status:{item.status} · fwd:{item.forwarding}
                 </p>
+                {item.interaction?.interactionType ? (
+                  <p className="text-[11px] text-cyan-300 mt-1 break-all">
+                    interactive: {item.interaction.interactionType}
+                    {item.interaction.id ? ` · id:${item.interaction.id}` : ''}
+                    {item.interaction.title ? ` · title:${item.interaction.title}` : ''}
+                  </p>
+                ) : null}
+                {item.badges.length ? (
+                  <p className="text-[11px] text-amber-300 mt-1 break-all">flags: {item.badges.join(', ')}</p>
+                ) : null}
+                {item.quotedPreview ? <p className="text-[11px] text-zinc-400 mt-1 break-all">quoted: {item.quotedPreview}</p> : null}
                 <p className="text-[11px] text-zinc-500 mt-1 break-all">
                   from:{item.sender} to:{item.recipient} · fromMe:{String(item.fromMe)} · fromBot:{String(item.fromBot)}
                 </p>

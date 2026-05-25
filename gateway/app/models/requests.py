@@ -90,6 +90,7 @@ class WebhookConfigRequest(BaseModel):
     authType: WebhookAuthType = "NONE"
     authConfig: dict[str, str] = Field(default_factory=dict)
     customHeaders: dict[str, str] = Field(default_factory=dict)
+    eventFilters: dict[str, bool] = Field(default_factory=lambda: {"business": True, "transport": False, "operational": False})
 
 
 class WebhookEnabledRequest(BaseModel):

@@ -62,7 +62,7 @@ export interface PipelineEvent {
   sender?: string
   recipient?: string
   text?: string
-  content?: string
+  content?: unknown
   status?: string
   fromMe?: boolean
   fromBot?: boolean
@@ -81,6 +81,34 @@ export interface PipelineEvent {
     kind?: string
     text?: string
   }
+  interaction?: {
+    interactionType?: 'button' | 'list' | 'template' | 'flow' | 'unknown'
+    id?: string | null
+    title?: string | null
+    description?: string | null
+    payload?: Record<string, unknown>
+    rawSelection?: Record<string, unknown>
+  } | null
+  context?: {
+    quoted?: {
+      messageId?: string | null
+      sender?: string | null
+      chatJid?: string | null
+      type?: string | null
+      text?: string | null
+      mediaType?: string | null
+      preview?: string | null
+    } | null
+    interactiveOrigin?: {
+      messageType?: string
+    } | null
+    targetMessage?: {
+      messageId?: string | null
+      sender?: string | null
+      chatJid?: string | null
+    } | null
+    targetPollId?: string | null
+  } | null
   media?: {
     id: string
     kind?: string
@@ -105,6 +133,20 @@ export interface PipelineEvent {
     messageId?: string
   }
   details?: Record<string, unknown>
+  metadata?: {
+    hasLocation?: boolean
+    hasContacts?: boolean
+    hasPoll?: boolean
+    removeReaction?: boolean
+    liveLocation?: boolean
+    pollOptionCount?: number
+    ephemeral?: boolean
+    edited?: boolean
+    revoked?: boolean
+    fromBusiness?: boolean
+    newsletter?: boolean
+    statusMessage?: boolean
+  }
 }
 
 export type WebhookAuthType = 'NONE' | 'BEARER' | 'API_KEY' | 'BASIC' | 'CUSTOM_HEADERS'
@@ -117,9 +159,50 @@ export interface InstanceWebhook {
   authType: WebhookAuthType
   authConfig: Record<string, string>
   customHeaders: Record<string, string>
+  eventFilters?: {
+    business?: boolean
+    transport?: boolean
+    operational?: boolean
+  }
   createdAt?: string | null
   updatedAt?: string | null
   lastUsedAt?: string | null
   lastStatus?: string | null
   lastError?: string | null
+  lastSuccessAt?: string | null
+  lastFailureAt?: string | null
+  lastStatusCode?: number | null
+  lastLatencyMs?: number | null
+  avgLatencyMs?: number | null
+  consecutiveFailures?: number
+  healthStatus?: 'healthy' | 'degraded' | 'unhealthy'
+  unhealthy?: boolean
+  successCount?: number
+  failureCount?: number
+  retryCount?: number
+  unhealthyCount?: number
+  dispatchHistory?: WebhookDispatchLog[]
+}
+
+export interface WebhookDispatchLog {
+  timestamp: number
+  status: string
+  dispatchId?: string
+  messageId?: string | null
+  eventSubtype?: string | null
+  retryCount?: number
+  responseCode?: number
+  durationMs?: number
+  error?: string | null
+  webhookUrl?: string
+  request?: {
+    method?: string
+    headers?: Record<string, string>
+    payloadSummary?: Record<string, unknown>
+    payloadSizeBytes?: number
+  }
+  response?: {
+    headers?: Record<string, string>
+    bodyPreview?: string
+  }
 }
