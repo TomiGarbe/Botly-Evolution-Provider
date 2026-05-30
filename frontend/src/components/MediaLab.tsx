@@ -567,7 +567,7 @@ export default function MediaLab({
                 {item.text ? <p className="text-sm text-zinc-200 mt-1 whitespace-pre-wrap">{item.text}</p> : null}
                 {item.media ? (
                   <div className="text-[11px] text-zinc-300 mt-1 break-all">
-                    media: {item.media.kind ?? item.messageType} · {item.media.mimeType ?? 'n/a'} · {item.media.fileName ?? item.media.id}
+                    media: {item.media.kind ?? item.messageType} · {item.media.mimeType ?? 'n/a'} · {item.media.fileName ?? item.media.id} · source:{item.media.downloadSource ?? 'provider-url'} · size:{item.media.fileSize ?? 'n/a'}
                     {item.media.url ? ` · ${item.media.url}` : ''}
                   </div>
                 ) : null}

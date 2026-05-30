@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.services.media import cleanup_cache, get_uploaded_file, save_uploaded_file, stream_from_url
+from app.services.media import cleanup_cache, get_decrypted_media_bytes, get_uploaded_file, save_uploaded_file, stream_from_url
 from app.services.normalization import get_media
 
 router = APIRouter(tags=["media"])
@@ -89,7 +89,7 @@ def _allowed_mime(effective_mime: str, filename: str | None) -> bool:
 
 @router.get("/instances/{instance_name}/media/{media_id}")
 async def proxy_media(instance_name: str, media_id: str):
-    metadata = get_media(media_id)
+    metadata = get_media(media_id, instance=instance_name)
     if not metadata:
         raise HTTPException(status_code=404, detail="Media no encontrada en cache de eventos")
     if metadata.get("instance") != instance_name:
@@ -97,15 +97,27 @@ async def proxy_media(instance_name: str, media_id: str):
     source_url = str(metadata.get("url") or "")
     if not source_url:
         raise HTTPException(status_code=404, detail="Media sin URL")
+    logger.info(
+        "media_proxy_request",
+        instance=instance_name,
+        media_id=media_id,
+        source_url=source_url,
+        direct_path=str(metadata.get("directPath") or ""),
+        mime_type=str(metadata.get("mimeType") or ""),
+        has_media_key=bool(metadata.get("mediaKey")),
+    )
 
     try:
-        stream, headers = await stream_from_url(source_url, use_cache=True)
+        payload, info = await get_decrypted_media_bytes(metadata)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"No se pudo descargar media: {exc}")
-    response_headers = {"X-Media-Source": "evolution"}
-    response_headers.update(headers)
+        raise HTTPException(status_code=502, detail=f"media_decrypt_failed: {exc}")
+    response_headers = {
+        "X-Media-Source": str(info.get("source") or "decrypted"),
+        "X-Media-Magic": str(info.get("magic") or "unknown"),
+        "Content-Length": str(len(payload)),
+    }
     media_type = str(metadata.get("mimeType") or "application/octet-stream")
-    return StreamingResponse(stream, media_type=media_type, headers=response_headers)
+    return StreamingResponse(iter([payload]), media_type=media_type, headers=response_headers)
 
 
 @router.get("/media/fetch")

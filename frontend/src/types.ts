@@ -120,6 +120,7 @@ export interface PipelineEvent {
     isVoiceNote?: boolean
     url?: string
     directPath?: string
+    downloadSource?: 'provider-url' | 'decrypted' | 'cache' | string
   } | null
   meta?: {
     requestId?: string

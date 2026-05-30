@@ -6,6 +6,7 @@ from collections import deque
 from typing import Any
 
 from app.core.config import get_settings
+from app.core.logging import get_logger
 
 MEDIA_MESSAGE_KEYS = (
     "imageMessage",
@@ -51,6 +52,7 @@ TECHNICAL_EVENTS = {
 }
 
 _settings = get_settings()
+logger = get_logger(__name__)
 _raw_events: deque[dict[str, Any]] = deque(maxlen=_settings.webhook_event_retention)
 _operational_events: deque[dict[str, Any]] = deque(maxlen=_settings.webhook_event_retention)
 _business_events: deque[dict[str, Any]] = deque(maxlen=_settings.webhook_event_retention)
@@ -250,7 +252,7 @@ def _extract_media(message: dict[str, Any], kind: str) -> dict[str, Any] | None:
     raw = message.get(media_key_name) or {}
     direct_path = str(raw.get("directPath") or "").strip()
     url = str(raw.get("url") or "").strip()
-    media_id = str(raw.get("mediaKey") or raw.get("fileSha256") or uuid.uuid4())
+    media_id = str(uuid.uuid4())
     dimensions = {
         "width": raw.get("width"),
         "height": raw.get("height"),
@@ -264,6 +266,8 @@ def _extract_media(message: dict[str, Any], kind: str) -> dict[str, Any] | None:
         "fileName": raw.get("fileName"),
         "fileSize": raw.get("fileLength"),
         "mediaKey": raw.get("mediaKey"),
+        "fileSha256": raw.get("fileSha256"),
+        "fileEncSha256": raw.get("fileEncSha256"),
         "duration": raw.get("seconds"),
         "caption": raw.get("caption"),
         "url": url,
@@ -271,6 +275,7 @@ def _extract_media(message: dict[str, Any], kind: str) -> dict[str, Any] | None:
         "thumbnail": raw.get("jpegThumbnail"),
         "dimensions": dimensions,
         "isVoiceNote": bool(raw.get("ptt")),
+        "downloadSource": "provider-url",
     }
 
 
@@ -791,12 +796,45 @@ def save_event(normalized: dict[str, Any]) -> None:
     media = normalized.get("media")
     message = normalized.get("message") or {}
     if isinstance(media, dict):
+        raw_payload = normalized.get("raw") if isinstance(normalized.get("raw"), dict) else {}
+        raw_data = raw_payload.get("data") if isinstance(raw_payload.get("data"), dict) else {}
+        key_obj = raw_data.get("key") if isinstance(raw_data.get("key"), dict) else {}
+        message_obj = raw_data.get("message") if isinstance(raw_data.get("message"), dict) else {}
         _media_index[str(media.get("id"))] = {
             **media,
             "instance": normalized.get("instance"),
             "messageId": message.get("id"),
             "savedAt": int(time.time()),
+            "remoteJid": key_obj.get("remoteJid"),
+            "fromMe": key_obj.get("fromMe"),
+            "participant": key_obj.get("participant"),
+            "messageKey": key_obj,
+            "messageObject": message_obj,
         }
+        logger.info(
+            "media_index_store",
+            instance=normalized.get("instance"),
+            message_id=message.get("id"),
+            media_id=media.get("id"),
+            stored_key=str(media.get("id") or ""),
+            media_key=media.get("mediaKey"),
+            file_sha256=((message_obj.get("imageMessage") or {}).get("fileSha256") if isinstance(message_obj, dict) else None)
+            or ((message_obj.get("audioMessage") or {}).get("fileSha256") if isinstance(message_obj, dict) else None)
+            or ((message_obj.get("videoMessage") or {}).get("fileSha256") if isinstance(message_obj, dict) else None)
+            or ((message_obj.get("documentMessage") or {}).get("fileSha256") if isinstance(message_obj, dict) else None),
+            direct_path=media.get("directPath"),
+        )
+        logger.info(
+            "media_indexed_probe",
+            instance=normalized.get("instance"),
+            message_id=message.get("id"),
+            media_id=media.get("id"),
+            kind=media.get("kind"),
+            mime_type=media.get("mimeType"),
+            source_url=media.get("url"),
+            direct_path=media.get("directPath"),
+            has_media_key=bool(media.get("mediaKey")),
+        )
 
 
 def _event_dedupe_key(normalized: dict[str, Any]) -> str | None:
@@ -849,11 +887,49 @@ def list_events(instance: str | None = None, limit: int = 100) -> list[dict[str,
     for event in merged:
         if instance and event.get("instance") != instance:
             continue
+        media = event.get("media")
+        if isinstance(media, dict):
+            media_id = str(media.get("id") or "")
+            tracked = _media_index.get(media_id) if media_id else None
+            if isinstance(tracked, dict) and tracked.get("downloadSource"):
+                event = {**event, "media": {**media, "downloadSource": tracked.get("downloadSource"), "decryptedSize": tracked.get("decryptedSize")}}
         items.append(event)
         if len(items) >= limit:
             break
     return items
 
 
-def get_media(media_id: str) -> dict[str, Any] | None:
-    return _media_index.get(media_id)
+def get_media(media_id: str, *, instance: str | None = None) -> dict[str, Any] | None:
+    key = str(media_id or "").strip()
+    item = _media_index.get(key)
+    if item:
+        logger.info(
+            "media_index_lookup",
+            instance=instance or item.get("instance"),
+            lookup_key=key,
+            stored_key=key,
+            message_id=item.get("messageId"),
+            media_id=item.get("id"),
+            found=True,
+        )
+        return item
+
+    logger.info(
+        "media_index_lookup",
+        instance=instance,
+        lookup_key=key,
+        stored_key=None,
+        message_id=None,
+        media_id=None,
+        found=False,
+    )
+    return None
+
+
+def update_media_download_state(media_id: str, *, source: str, decrypted_size: int | None = None) -> None:
+    item = _media_index.get(media_id)
+    if not isinstance(item, dict):
+        return
+    item["downloadSource"] = source
+    if decrypted_size is not None:
+        item["decryptedSize"] = decrypted_size

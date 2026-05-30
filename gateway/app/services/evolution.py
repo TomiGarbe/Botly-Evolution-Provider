@@ -361,3 +361,73 @@ async def check_whatsapp_numbers(instance_name: str, numbers: list[str]) -> list
         json={"numbers": numbers},
         retries=0,
     )
+
+
+def _find_base64_candidate(node: Any) -> str | None:
+    if isinstance(node, str):
+        text = node.strip()
+        if text.startswith("data:") and ";base64," in text:
+            return text.split(";base64,", 1)[1].strip()
+        if text and len(text) > 60:
+            try:
+                base64.b64decode(text, validate=True)
+                return text
+            except Exception:
+                return None
+        return None
+    if isinstance(node, dict):
+        for key in ("base64", "data", "media", "file", "content"):
+            if key in node:
+                found = _find_base64_candidate(node.get(key))
+                if found:
+                    return found
+        for value in node.values():
+            found = _find_base64_candidate(value)
+            if found:
+                return found
+    if isinstance(node, list):
+        for item in node:
+            found = _find_base64_candidate(item)
+            if found:
+                return found
+    return None
+
+
+async def get_base64_from_media_message(
+    instance_name: str,
+    *,
+    message_key: dict[str, Any],
+    message_object: dict[str, Any] | None = None,
+    convert_to_mp4: bool = False,
+) -> str:
+    if not isinstance(message_key, dict) or not str(message_key.get("id") or "").strip():
+        raise EvolutionError(
+            message="No se pudo descifrar media: falta message.key.id",
+            status_code=422,
+            retryable=False,
+        )
+
+    body: dict[str, Any] = {
+        "message": {
+            "key": message_key,
+        },
+        "convertToMp4": bool(convert_to_mp4),
+    }
+    if isinstance(message_object, dict) and message_object:
+        body["message"]["message"] = message_object
+
+    result = await _request(
+        "POST",
+        f"/chat/getBase64FromMediaMessage/{instance_name}",
+        json=body,
+        retries=0,
+    )
+    candidate = _find_base64_candidate(result)
+    if not candidate:
+        raise EvolutionError(
+            message="Evolution no devolvio base64 para media message",
+            status_code=502,
+            detail={"endpoint": f"/chat/getBase64FromMediaMessage/{instance_name}", "response_type": type(result).__name__},
+            retryable=False,
+        )
+    return candidate
