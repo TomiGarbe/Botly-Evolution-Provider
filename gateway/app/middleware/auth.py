@@ -12,6 +12,7 @@ logger = get_logger(__name__)
 
 _PUBLIC_PATHS = {"/health", "/webhooks/evolution"}
 _PUBLIC_PREFIXES = ("/media/upload/",)
+_PUBLIC_MEDIA_ROUTE = re.compile(r"^/instances/[^/]+/media/[^/]+/?$")
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -38,6 +39,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if request.url.path in _PUBLIC_PATHS:
             return await call_next(request)
         if any(request.url.path.startswith(prefix) for prefix in _PUBLIC_PREFIXES):
+            return await call_next(request)
+        if request.method in {"GET", "HEAD"} and _PUBLIC_MEDIA_ROUTE.match(request.url.path):
             return await call_next(request)
 
         request.state.auth_mode = "none"
