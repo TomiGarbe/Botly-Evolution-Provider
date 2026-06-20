@@ -9,6 +9,11 @@ class Settings(BaseSettings):
     public_base_url: str = ""
     log_level: str = "info"
     debug: bool = False
+    cors_allowed_origins: str = (
+        "http://localhost:5174,"
+        "http://127.0.0.1:5174,"
+        "https://panel-evolution.botly.com.ar"
+    )
 
     # Evolution API
     evolution_url: str = "http://evolution:8080"
@@ -53,6 +58,23 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @property
+    def cors_allowed_origins_list(self) -> list[str]:
+        origins: list[str] = []
+        seen: set[str] = set()
+
+        for raw_origin in self.cors_allowed_origins.split(","):
+            origin = raw_origin.strip()
+            if not origin:
+                continue
+            if origin.endswith("/"):
+                origin = origin.rstrip("/")
+            if origin not in seen:
+                origins.append(origin)
+                seen.add(origin)
+
+        return origins
 
 
 @lru_cache

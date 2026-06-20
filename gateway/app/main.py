@@ -53,6 +53,11 @@ async def _startup_recovery() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("gateway_starting", port=settings.gateway_port, debug=settings.debug)
+    logger.info(
+        "cors_configuration",
+        allow_origins=settings.cors_allowed_origins_list,
+        allow_origin_regex=r"^https?://localhost(:\d+)?$",
+    )
     logger.info("[BOOT][DB] evolution connectivity setup", evolution_url=settings.evolution_url)
     logger.info(
         "[BOOT][VOLUMES] gateway persistence paths",
@@ -90,11 +95,7 @@ app.add_middleware(AuthMiddleware)
 app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-        "https://panel-evolution.botly.com.ar"
-    ],
+    allow_origins=settings.cors_allowed_origins_list,
     allow_origin_regex=r"^https?://localhost(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
