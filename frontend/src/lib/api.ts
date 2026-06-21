@@ -1,5 +1,5 @@
 import type { GatewayConfig } from './config'
-import type { Instance, InstanceApiKey, InstanceState, QRResponse, InstanceWebhook, WebhookAuthType, WebhookDispatchLog } from '../types'
+import type { Instance, InstanceApiKey, InstanceCreationResult, InstanceState, QRResponse, InstanceWebhook, WebhookAuthType, WebhookDispatchLog } from '../types'
 
 const DEFAULT_TIMEOUT_MS = 10000
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504])
@@ -120,9 +120,19 @@ export const api = {
         qrcode: true,
         auto_configure_webhook: true,
       })
+      if (raw && typeof raw === 'object' && 'instance' in raw) {
+        const payload = raw as { instance?: unknown; apiKey?: unknown }
+        const parsed = normalizeInstance(payload.instance)
+        if (!parsed) throw new ApiError(502, 'Respuesta invalida al crear instancia')
+        return {
+          instance: parsed,
+          apiKey: typeof payload.apiKey === 'string' ? payload.apiKey : null,
+        } satisfies InstanceCreationResult
+      }
+
       const parsed = normalizeInstance(raw)
       if (!parsed) throw new ApiError(502, 'Respuesta invalida al crear instancia')
-      return parsed
+      return { instance: parsed, apiKey: null } satisfies InstanceCreationResult
     },
 
     state: async (cfg: GatewayConfig, name: string) => {

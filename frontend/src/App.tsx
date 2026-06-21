@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from 'react'
 import useSWR from 'swr'
-import { Plus, RefreshCw, Server } from 'lucide-react'
+import { Menu, Plus, RefreshCw, Server } from 'lucide-react'
 import Sidebar from './components/Sidebar'
 import InstanceCard from './components/InstanceCard'
 import QRModal from './components/QRModal'
@@ -9,13 +9,14 @@ import SettingsModal from './components/SettingsModal'
 import MediaLab from './components/MediaLab'
 import InstanceApiKeyModal from './components/InstanceApiKeyModal'
 import WebhooksManager from './components/WebhooksManager'
+import ApiKeyRevealModal from './components/ApiKeyRevealModal'
 import { api, ApiError } from './lib/api'
 import { loadConfig, type GatewayConfig } from './lib/config'
 import type { Toast } from './types'
 
 function Toasts({ toasts, remove }: { toasts: Toast[]; remove: (id: string) => void }) {
   return (
-    <div className="fixed bottom-4 right-4 flex flex-col gap-2 z-[200] pointer-events-none">
+    <div className="fixed bottom-20 lg:bottom-4 right-4 left-4 sm:left-auto flex flex-col gap-2 z-[200] pointer-events-none">
       {toasts.map(t => (
         <div
           key={t.id}
@@ -64,10 +65,17 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false)
   const [apiKeyTarget, setApiKeyTarget] = useState<string | null>(null)
   const [view, setView] = useState<'instances' | 'messages' | 'webhooks'>('instances')
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [revealedApiKey, setRevealedApiKey] = useState<{ instanceName: string; apiKey: string; title: string; description: string } | null>(null)
 
   useEffect(() => {
     if (!config.apiKey) setShowSettings(true)
   }, [config.apiKey])
+
+  useEffect(() => {
+    document.body.classList.toggle('overflow-hidden', mobileNavOpen)
+    return () => document.body.classList.remove('overflow-hidden')
+  }, [mobileNavOpen])
 
   const addToast = useCallback((message: string, type: Toast['type'] = 'info') => {
     const id = Math.random().toString(36).slice(2)
@@ -92,10 +100,18 @@ export default function App() {
   )
 
   const handleCreate = useCallback(async (name: string) => {
-    await api.instances.create(config, name)
+    const created = await api.instances.create(config, name)
     addToast(`Instancia "${name}" creada`, 'success')
     await mutate()
     setShowCreate(false)
+    if (created.apiKey) {
+      setRevealedApiKey({
+        instanceName: name,
+        apiKey: created.apiKey,
+        title: 'API key creada',
+        description: 'Guardala ahora. Esta es la unica vez que el panel muestra la API key completa al crear la instancia.',
+      })
+    }
     setQrTarget(name)
   }, [config, mutate, addToast])
 
@@ -130,43 +146,60 @@ export default function App() {
   const list = Array.isArray(instances) ? instances : []
 
   return (
-    <div className="flex min-h-screen">
-      <Sidebar onOpenSettings={() => setShowSettings(true)} view={view} onChangeView={setView} />
+    <div className="flex min-h-screen bg-zinc-950">
+      <Sidebar
+        onOpenSettings={() => setShowSettings(true)}
+        view={view}
+        onChangeView={setView}
+        mobileOpen={mobileNavOpen}
+        onCloseMobile={() => setMobileNavOpen(false)}
+      />
 
       <div className="flex-1 flex flex-col min-w-0">
-        <header className="flex items-center justify-between px-8 h-14 border-b border-zinc-800 shrink-0">
-          <div>
-            <h1 className="font-semibold text-sm">{view === 'instances' ? 'Instancias' : view === 'messages' ? 'Mensajes' : 'Webhooks'}</h1>
+        <header className="flex items-center justify-between gap-3 px-4 sm:px-6 lg:px-8 min-h-14 py-3 border-b border-zinc-800 shrink-0">
+          <div className="min-w-0">
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setMobileNavOpen(true)}
+                className="lg:hidden inline-flex items-center justify-center w-9 h-9 rounded-lg border border-zinc-800 text-zinc-300 hover:bg-zinc-900"
+                aria-label="Abrir menu"
+              >
+                <Menu size={16} />
+              </button>
+              <h1 className="font-semibold text-sm">{view === 'instances' ? 'Instancias' : view === 'messages' ? 'Mensajes' : 'Webhooks'}</h1>
+            </div>
             {!isLoading && view === 'instances' && (
-              <p className="text-xs text-zinc-500 mt-0.5">
+              <p className="text-xs text-zinc-500 mt-0.5 ml-12 lg:ml-0">
                 {list.length} {list.length === 1 ? 'instancia' : 'instancias'} totales
               </p>
             )}
           </div>
-          <div className="flex items-center gap-2">
+
+          <div className="flex items-center gap-2 shrink-0">
             {view === 'instances' ? (
               <>
                 <button
                   onClick={() => mutate()}
                   disabled={isValidating}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-zinc-500 hover:text-zinc-300 border border-zinc-800 hover:border-zinc-700 rounded-lg transition-colors disabled:opacity-40"
+                  className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 text-xs text-zinc-500 hover:text-zinc-300 border border-zinc-800 hover:border-zinc-700 rounded-lg transition-colors disabled:opacity-40"
                 >
                   <RefreshCw size={12} className={isValidating ? 'animate-spin' : ''} />
-                  Actualizar
+                  <span className="hidden sm:inline">Actualizar</span>
                 </button>
                 <button
                   onClick={() => setShowCreate(true)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors"
+                  className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors"
                 >
                   <Plus size={13} />
-                  Nueva instancia
+                  <span className="hidden sm:inline">Nueva instancia</span>
                 </button>
               </>
             ) : null}
           </div>
         </header>
 
-        <main className="flex-1 px-8 py-6">
+        <main className="flex-1 px-4 sm:px-6 lg:px-8 py-4 sm:py-6 pb-24 lg:pb-6">
           {view === 'messages' ? (
             <MediaLab
               config={config}
@@ -241,10 +274,61 @@ export default function App() {
           instanceName={apiKeyTarget}
           onClose={() => setApiKeyTarget(null)}
           onToast={addToast}
+          onRevealApiKey={apiKey =>
+            setRevealedApiKey({
+              instanceName: apiKeyTarget,
+              apiKey,
+              title: 'API key regenerada',
+              description: 'La clave anterior ya no sirve. Copia esta nueva API key y actualiza tus integraciones antes de seguir.',
+            })
+          }
+        />
+      )}
+      {revealedApiKey && (
+        <ApiKeyRevealModal
+          apiKey={revealedApiKey.apiKey}
+          instanceName={revealedApiKey.instanceName}
+          title={revealedApiKey.title}
+          description={revealedApiKey.description}
+          onClose={() => setRevealedApiKey(null)}
+          onToast={addToast}
         />
       )}
 
       <Toasts toasts={toasts} remove={removeToast} />
+
+      <nav className="lg:hidden fixed inset-x-0 bottom-0 z-30 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur px-2 py-2">
+        <div className="grid grid-cols-4 gap-2">
+          <button
+            type="button"
+            onClick={() => setView('instances')}
+            className={`rounded-lg px-3 py-2 text-xs ${view === 'instances' ? 'bg-zinc-800 text-zinc-50' : 'text-zinc-500'}`}
+          >
+            Instancias
+          </button>
+          <button
+            type="button"
+            onClick={() => setView('messages')}
+            className={`rounded-lg px-3 py-2 text-xs ${view === 'messages' ? 'bg-zinc-800 text-zinc-50' : 'text-zinc-500'}`}
+          >
+            Mensajes
+          </button>
+          <button
+            type="button"
+            onClick={() => setView('webhooks')}
+            className={`rounded-lg px-3 py-2 text-xs ${view === 'webhooks' ? 'bg-zinc-800 text-zinc-50' : 'text-zinc-500'}`}
+          >
+            Webhooks
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowSettings(true)}
+            className="rounded-lg px-3 py-2 text-xs text-zinc-500"
+          >
+            Ajustes
+          </button>
+        </div>
+      </nav>
     </div>
   )
 }

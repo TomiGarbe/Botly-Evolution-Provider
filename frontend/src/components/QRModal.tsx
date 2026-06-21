@@ -96,7 +96,7 @@ export default function QRModal({ instanceName, config, onClose, onConnected }: 
         if (e.target === e.currentTarget) onClose()
       }}
     >
-      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-sm flex flex-col gap-0 overflow-hidden animate-slide-up">
+      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-sm max-h-[calc(100vh-2rem)] flex flex-col gap-0 overflow-hidden animate-slide-up">
         <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
           <div>
             <h2 className="font-semibold text-sm">Vincular numero</h2>
@@ -107,7 +107,7 @@ export default function QRModal({ instanceName, config, onClose, onConnected }: 
           </button>
         </div>
 
-        <div className="px-5 py-5">
+        <div className="px-5 py-5 overflow-y-auto">
           {state === 'open' ? (
             <div className="flex flex-col items-center gap-3 py-6">
               <CheckCircle2 size={48} className="text-emerald-400" />
@@ -140,7 +140,7 @@ export default function QRModal({ instanceName, config, onClose, onConnected }: 
                 {errorMessage}
               </div>
             )}
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
               <button
                 onClick={handleRefresh}
                 disabled={isBusy}

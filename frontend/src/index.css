@@ -4,6 +4,8 @@
 
 @layer base {
   * { @apply border-zinc-800; }
+  html { color-scheme: dark; }
+  body { @apply bg-zinc-950 text-zinc-50; }
   ::-webkit-scrollbar { @apply w-1.5; }
   ::-webkit-scrollbar-track { @apply bg-transparent; }
   ::-webkit-scrollbar-thumb { @apply bg-zinc-700 rounded-full; }

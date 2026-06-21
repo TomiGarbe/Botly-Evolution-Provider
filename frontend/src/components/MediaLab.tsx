@@ -530,7 +530,7 @@ export default function MediaLab({
           disabled={sending}
         />
 
-        <div className="grid grid-cols-5 gap-1 rounded border border-zinc-800 p-1 bg-zinc-950">
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-1 rounded border border-zinc-800 p-1 bg-zinc-950">
           {(['text', 'audio', 'image', 'video', 'file'] as MessageMode[]).map(item => (
             <button
               key={item}
@@ -604,7 +604,7 @@ export default function MediaLab({
         {sendError ? <p className="text-xs text-red-400">{sendError}</p> : null}
         {sendSuccess ? <p className="text-xs text-emerald-400">{sendSuccess}</p> : null}
 
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           <button
             onClick={() => void onSubmit()}
             disabled={sending || !instance || openInstances.length === 0}
@@ -621,7 +621,7 @@ export default function MediaLab({
           </button>
         </div>
 
-        <div className="grid grid-cols-2 gap-2 pt-2 border-t border-zinc-800">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-2 border-t border-zinc-800">
           <button onClick={() => setPaused(v => !v)} className="px-2 py-1.5 text-xs rounded border border-zinc-700 hover:border-zinc-500">{paused ? 'Reanudar polling' : 'Pausar polling'}</button>
           <button onClick={() => setAutoScroll(v => !v)} className="px-2 py-1.5 text-xs rounded border border-zinc-700 hover:border-zinc-500">{autoScroll ? 'Auto-scroll ON' : 'Auto-scroll OFF'}</button>
           <button onClick={() => setClearedAt(Date.now())} className="px-2 py-1.5 text-xs rounded border border-zinc-700 hover:border-zinc-500">Clear timeline</button>
@@ -629,7 +629,7 @@ export default function MediaLab({
         </div>
       </div>
 
-      <div className="lg:col-span-2 bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+      <div className="lg:col-span-2 bg-zinc-900 border border-zinc-800 rounded-xl p-4 min-w-0">
         <div className="flex flex-wrap items-center gap-2 mb-3">
           <select value={onlyDirection} onChange={e => setOnlyDirection(e.target.value as 'all' | ConsoleDirection)} className="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-xs">
             <option value="all">all directions</option>
@@ -655,7 +655,7 @@ export default function MediaLab({
           <span className="text-xs text-zinc-500">{isLoading ? 'Cargando...' : `${items.length} eventos`}</span>
         </div>
 
-        <div ref={listRef} className="space-y-2 max-h-[640px] overflow-auto pr-1">
+        <div ref={listRef} className="space-y-2 max-h-[70vh] lg:max-h-[640px] overflow-auto pr-1">
           {items.map(item => {
             const eventKey = `${item.instance}:${item.id}:${item.timestamp}`
             const jsonIsOpen = Boolean(expandedJson[eventKey])

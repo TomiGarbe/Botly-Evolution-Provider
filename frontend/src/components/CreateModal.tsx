@@ -43,7 +43,7 @@ export default function CreateModal({ onClose, onCreate }: Props) {
       className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in"
       onClick={e => { if (e.target === e.currentTarget) onClose() }}
     >
-      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-md flex flex-col gap-0 overflow-hidden animate-slide-up">
+      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-md max-h-[calc(100vh-2rem)] flex flex-col gap-0 overflow-hidden animate-slide-up">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
           <h2 className="font-semibold text-sm">Nueva instancia</h2>
@@ -79,7 +79,7 @@ export default function CreateModal({ onClose, onCreate }: Props) {
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-zinc-800">
+        <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-end gap-2 px-5 py-4 border-t border-zinc-800">
           <button
             onClick={onClose}
             className="px-4 py-2 text-sm text-zinc-400 hover:text-zinc-200 transition-colors rounded-lg hover:bg-zinc-800"

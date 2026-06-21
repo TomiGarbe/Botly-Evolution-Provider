@@ -51,7 +51,7 @@ export default function SettingsModal({ config, onClose, onChange }: Props) {
       className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in"
       onClick={e => { if (e.target === e.currentTarget) onClose() }}
     >
-      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-md flex flex-col overflow-hidden animate-slide-up">
+      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-md max-h-[calc(100vh-2rem)] flex flex-col overflow-hidden animate-slide-up">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
           <h2 className="font-semibold text-sm">Configuración</h2>
@@ -61,7 +61,7 @@ export default function SettingsModal({ config, onClose, onChange }: Props) {
         </div>
 
         {/* Body */}
-        <div className="px-5 py-5 flex flex-col gap-5">
+        <div className="px-5 py-5 flex flex-col gap-5 overflow-y-auto">
           <div className="flex flex-col gap-1.5">
             <label className="text-xs font-medium text-zinc-400">Gateway URL</label>
             <input
@@ -124,7 +124,7 @@ export default function SettingsModal({ config, onClose, onChange }: Props) {
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between gap-2 px-5 py-4 border-t border-zinc-800">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-5 py-4 border-t border-zinc-800">
           <button
             onClick={handleTest}
             disabled={test === 'loading'}
@@ -133,7 +133,7 @@ export default function SettingsModal({ config, onClose, onChange }: Props) {
             {test === 'loading' && <Loader2 size={12} className="animate-spin" />}
             Probar conexión
           </button>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 self-end sm:self-auto">
             <button
               onClick={onClose}
               className="px-4 py-2 text-sm text-zinc-400 hover:text-zinc-200 transition-colors rounded-lg hover:bg-zinc-800"

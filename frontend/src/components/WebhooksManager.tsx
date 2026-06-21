@@ -239,13 +239,13 @@ export default function WebhooksManager({ config, instances, onToast }: Props) {
           <p className="text-xs text-zinc-300">Internal Evolution Webhook: Evolution -&gt; Gateway /webhooks/evolution (auth por EVOLUTION_API_KEY).</p>
           <p className="text-xs text-zinc-400 mt-1">External Bot Webhooks: Gateway -&gt; Bot URL (auth por authType de cada webhook).</p>
         </div>
-        <div className="p-4 border-b border-zinc-800 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
+        <div className="p-4 border-b border-zinc-800 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2">
             <span className="text-sm text-zinc-400">Instancia</span>
             <select
               value={instanceName}
               onChange={e => setInstanceName(e.target.value)}
-              className="bg-zinc-950 border border-zinc-800 rounded-md px-2 py-1.5 text-sm"
+              className="bg-zinc-950 border border-zinc-800 rounded-md px-2 py-1.5 text-sm min-w-0"
             >
               {instances.map(inst => <option key={inst.id} value={inst.name}>{inst.name}</option>)}
             </select>
@@ -275,12 +275,12 @@ export default function WebhooksManager({ config, instances, onToast }: Props) {
         <div className="divide-y divide-zinc-800">
           {loading ? <p className="p-4 text-sm text-zinc-500">Cargando...</p> : items.length === 0 ? <p className="p-4 text-sm text-zinc-500">Sin webhooks</p> : items.map(item => (
             <div key={item.id} className="p-4 flex flex-col gap-2">
-              <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                 <div className="min-w-0">
                   <p className="text-sm font-medium text-zinc-100 truncate">{item.url}</p>
                   <p className="text-xs text-zinc-500">{item.authType} • {item.enabled ? 'enabled' : 'disabled'}</p>
                 </div>
-                <div className="flex items-center gap-1">
+                <div className="flex flex-wrap items-center gap-1">
                   <button onClick={() => navigator.clipboard.writeText(item.url)} className="p-1.5 border border-zinc-700 rounded-md text-zinc-300" title="Copy URL"><Copy size={13} /></button>
                   <button onClick={() => onTest(item)} className="p-1.5 border border-zinc-700 rounded-md text-zinc-300" title="Test webhook"><FlaskConical size={13} /></button>
                   <button onClick={() => onLoadDispatches(item)} className="px-2 py-1.5 border border-zinc-700 rounded-md text-zinc-300 text-xs">Dispatches</button>
@@ -321,7 +321,7 @@ export default function WebhooksManager({ config, instances, onToast }: Props) {
         </div>
       </div>
 
-      <div className="border border-zinc-800 bg-zinc-900 rounded-xl p-4 flex flex-col gap-3">
+      <div className="border border-zinc-800 bg-zinc-900 rounded-xl p-4 flex flex-col gap-3 min-w-0">
         <h3 className="text-sm font-semibold">{editing ? 'Editar webhook' : 'Nuevo webhook'}</h3>
         <input value={form.url} onChange={e => setForm(v => ({ ...v, url: e.target.value }))} placeholder="https://tu-sistema.com/webhook" className="bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm" />
         <label className="flex items-center gap-2 text-sm text-zinc-300"><input type="checkbox" checked={form.enabled} onChange={e => setForm(v => ({ ...v, enabled: e.target.checked }))} /> Enabled</label>

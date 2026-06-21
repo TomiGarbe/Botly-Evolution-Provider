@@ -9,9 +9,10 @@ interface Props {
   instanceName: string
   onClose: () => void
   onToast: (message: string, type?: 'success' | 'error' | 'info') => void
+  onRevealApiKey: (apiKey: string) => void
 }
 
-export default function InstanceApiKeyModal({ config, instanceName, onClose, onToast }: Props) {
+export default function InstanceApiKeyModal({ config, instanceName, onClose, onToast, onRevealApiKey }: Props) {
   const [data, setData] = useState<InstanceApiKey | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -38,6 +39,7 @@ export default function InstanceApiKeyModal({ config, instanceName, onClose, onT
     try {
       const payload = await api.instances.regenerateApiKey(config, instanceName)
       setData(payload)
+      if (payload.apiKey) onRevealApiKey(payload.apiKey)
       onToast('API key regenerada', 'success')
     } catch (error) {
       onToast(error instanceof ApiError ? error.message : 'No se pudo regenerar API key', 'error')
@@ -65,6 +67,7 @@ export default function InstanceApiKeyModal({ config, instanceName, onClose, onT
     try {
       const payload = await api.instances.enableApiKey(config, instanceName)
       setData(payload)
+      if (payload.apiKey) onRevealApiKey(payload.apiKey)
       onToast('API key habilitada', 'success')
     } catch (error) {
       onToast(error instanceof ApiError ? error.message : 'No se pudo habilitar API key', 'error')
@@ -75,12 +78,12 @@ export default function InstanceApiKeyModal({ config, instanceName, onClose, onT
 
   return (
     <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-xl overflow-hidden">
+      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-xl max-h-[calc(100vh-2rem)] overflow-hidden flex flex-col">
         <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
           <h2 className="font-semibold text-sm flex items-center gap-2"><KeyRound size={14} /> API key de instancia</h2>
           <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300"><X size={16} /></button>
         </div>
-        <div className="px-5 py-5 space-y-4">
+        <div className="px-5 py-5 space-y-4 overflow-y-auto">
           <p className="text-xs text-zinc-500">Instancia: <span className="font-mono text-zinc-300">{instanceName}</span></p>
           {loading ? <p className="text-sm text-zinc-400">Cargando...</p> : (
             <>
@@ -107,8 +110,8 @@ export default function InstanceApiKeyModal({ config, instanceName, onClose, onT
             <p>Regenerar invalida la clave anterior en el acto. Actualiza tus bots/integraciones antes de volver a enviar mensajes.</p>
           </div>
         </div>
-        <div className="px-5 py-4 border-t border-zinc-800 flex items-center justify-between">
-          <div className="flex gap-2">
+        <div className="px-5 py-4 border-t border-zinc-800 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div className="flex flex-wrap gap-2">
             <button disabled={busy} onClick={regenerate} className="px-3 py-2 text-xs bg-blue-600 hover:bg-blue-500 rounded-md text-white disabled:opacity-50 flex items-center gap-1"><RefreshCcw size={12} />Regenerar</button>
             {data?.enabled ? (
               <button disabled={busy} onClick={revoke} className="px-3 py-2 text-xs bg-red-700/80 hover:bg-red-700 rounded-md text-white disabled:opacity-50 flex items-center gap-1"><ShieldOff size={12} />Revocar</button>

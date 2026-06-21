@@ -108,7 +108,7 @@ export default function InstanceCard({ instance, config, onToast, onQR, onLogout
         </div>
       </div>
 
-      <div className="flex items-center gap-2 pt-1 border-t border-zinc-800">
+      <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-zinc-800">
         <button
           onClick={() => onApiKey(name)}
           className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-md transition-colors"
@@ -134,7 +134,7 @@ export default function InstanceCard({ instance, config, onToast, onQR, onLogout
             Desconectar
           </button>
         )}
-        <div className="flex-1" />
+        <div className="flex-1 hidden sm:block" />
         <button
           onClick={() => onDelete(name)}
           className="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 text-zinc-600 hover:text-red-400 hover:bg-red-950/40 rounded-md transition-colors"

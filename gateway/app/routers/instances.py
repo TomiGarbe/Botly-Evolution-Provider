@@ -12,7 +12,6 @@ from app.services.evolution import EvolutionError
 from app.services.instance_auth import (
     create_or_regenerate_instance_key,
     delete_instance_key_record,
-    ensure_instance_key,
     get_instance_key_info,
     revoke_instance_key,
 )
@@ -83,15 +82,18 @@ async def create_instance(body: CreateInstanceRequest):
 
     if body.auto_configure_webhook:
         await _configure_webhook_if_needed(instance_name)
-    ensure_instance_key(instance_name, instance_id=instance_name)
+    api_key_payload = create_or_regenerate_instance_key(instance_name, instance_id=instance_name)
 
     if isinstance(result, dict):
         normalized = normalize_instance(result)
         if normalized:
-            return normalized
+            return {"instance": normalized, "apiKey": api_key_payload.get("apiKey")}
 
     logger.warning("create_instance_response_unusable", instance=instance_name, raw=result)
-    return {"id": instance_name, "name": instance_name, "status": "connecting"}
+    return {
+        "instance": {"id": instance_name, "name": instance_name, "status": "connecting"},
+        "apiKey": api_key_payload.get("apiKey"),
+    }
 
 
 @router.get("/")

@@ -11,6 +11,11 @@ export interface Instance {
   createdAt?: string
 }
 
+export interface InstanceCreationResult {
+  instance: Instance
+  apiKey?: string | null
+}
+
 export interface InstanceApiKey {
   instanceId: string
   createdAt?: string | null
