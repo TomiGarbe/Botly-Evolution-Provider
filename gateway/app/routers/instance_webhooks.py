@@ -9,8 +9,11 @@ from app.services.instance_webhooks import (
     build_auth_headers,
     create_webhook,
     delete_webhook,
+    get_dispatch_metrics,
     get_webhook,
     list_instance_webhooks,
+    list_recent_dispatches,
+    list_webhook_dispatches,
     mask_headers_for_log,
     set_webhook_enabled,
     set_webhook_filters,
@@ -58,6 +61,7 @@ async def create_webhook_route(instance_name: str, request: Request, body: Webho
     _check_instance_scope(request, name)
     item = create_webhook(
         name,
+        name=body.name,
         url=_validate_url(body.url),
         enabled=body.enabled,
         auth_type=body.authType,
@@ -76,6 +80,7 @@ async def update_webhook_route(instance_name: str, webhook_id: str, request: Req
     item = update_webhook(
         name,
         webhook_id,
+        name=body.name,
         url=_validate_url(body.url),
         enabled=body.enabled,
         auth_type=body.authType,
@@ -234,9 +239,27 @@ async def list_dispatches_route(instance_name: str, webhook_id: str, request: Re
     item = get_webhook(name, webhook_id, reveal_secrets=False)
     if not item:
         raise HTTPException(status_code=404, detail="Webhook no encontrado")
-    history = item.get("dispatchHistory") if isinstance(item.get("dispatchHistory"), list) else []
     safe_limit = max(1, min(limit, 100))
-    return {"items": history[:safe_limit]}
+    return {"items": list_webhook_dispatches(name, webhook_id, limit=safe_limit)}
+
+
+@router.get("/deliveries")
+async def list_recent_deliveries_route(instance_name: str, request: Request, limit: int = 50, outcome: str = "all"):
+    name = _validate_instance_name(instance_name)
+    _check_instance_scope(request, name)
+    safe_limit = max(1, min(limit, 200))
+    normalized_outcome = str(outcome or "all").strip().lower()
+    success_filter: bool | None
+    if normalized_outcome == "success":
+        success_filter = True
+    elif normalized_outcome == "failed":
+        success_filter = False
+    else:
+        success_filter = None
+    return {
+        "items": list_recent_dispatches(name, limit=safe_limit, success=success_filter),
+        "metrics": get_dispatch_metrics(name),
+    }
 
 
 @router.post("/{webhook_id}/diagnose")

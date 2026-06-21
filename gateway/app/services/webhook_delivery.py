@@ -12,7 +12,7 @@ import httpx
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.services.instance_webhooks import append_dispatch_history, build_auth_headers, mark_dispatch_result_ex, mask_headers_for_log
+from app.services.instance_webhooks import append_dispatch_history, build_auth_headers, mask_headers_for_log
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -20,6 +20,9 @@ settings = get_settings()
 _RETRY_BACKOFF_SECONDS = [2, 5, 15]
 _RETRYABLE_HTTP = {500, 502, 503, 504}
 _NON_RETRYABLE_HTTP = {400, 401, 403, 404, 405, 409, 410, 422}
+_MAX_PAYLOAD_PREVIEW_CHARS = 4000
+_MAX_RESPONSE_PREVIEW_CHARS = 2000
+_MAX_STRING_SAMPLE_CHARS = 240
 
 
 def _is_retryable(status_code: int | None, exc: Exception | None) -> bool:
@@ -40,6 +43,16 @@ def _status_name(status_code: int | None, exc: Exception | None) -> str:
     return f"ok_{status_code}" if status_code and 200 <= status_code < 300 else f"http_{status_code or 0}"
 
 
+def _classify_http_error(status_code: int | None) -> str | None:
+    if status_code is None:
+        return None
+    if 400 <= status_code < 500:
+        return f"http_{status_code}_client"
+    if 500 <= status_code < 600:
+        return f"http_{status_code}_server"
+    return None
+
+
 def _should_verbose_dispatch_logs() -> bool:
     return bool(settings.webhook_debug)
 
@@ -56,6 +69,43 @@ def _payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "direction": payload.get("direction"),
         "textPreview": text[:120] if text else "",
     }
+
+
+def _looks_binary_blob(key: str, value: str) -> bool:
+    normalized_key = key.lower()
+    if normalized_key in {"base64", "data", "file", "bytes", "binary"}:
+        return True
+    compact = value.strip()
+    if len(compact) < 256:
+        return False
+    allowed = sum(1 for ch in compact if ch.isalnum() or ch in "+/=_-")
+    return (allowed / max(1, len(compact))) > 0.97
+
+
+def _truncate_payload_value(value: Any, *, key: str = "") -> Any:
+    if isinstance(value, dict):
+        return {str(sub_key): _truncate_payload_value(sub_value, key=str(sub_key)) for sub_key, sub_value in value.items()}
+    if isinstance(value, list):
+        return [_truncate_payload_value(item, key=key) for item in value[:25]]
+    if isinstance(value, str):
+        if _looks_binary_blob(key, value):
+            return f"[omitted binary-like content: {len(value)} chars]"
+        if len(value) > _MAX_STRING_SAMPLE_CHARS:
+            return f"{value[:_MAX_STRING_SAMPLE_CHARS]}...[truncated {len(value) - _MAX_STRING_SAMPLE_CHARS} chars]"
+    return value
+
+
+def _serialize_payload_preview(payload: dict[str, Any]) -> tuple[str, bool]:
+    sanitized = _truncate_payload_value(payload)
+    encoded = json.dumps(sanitized, ensure_ascii=True, default=str)
+    truncated = len(encoded) > _MAX_PAYLOAD_PREVIEW_CHARS
+    return encoded[:_MAX_PAYLOAD_PREVIEW_CHARS], truncated
+
+
+def _response_headers_summary(headers: httpx.Headers | dict[str, str]) -> dict[str, str]:
+    raw = dict(headers)
+    interesting = {"content-type", "content-length", "date", "server", "retry-after", "location", "x-request-id", "x-correlation-id"}
+    return {key: value for key, value in raw.items() if key.lower() in interesting or key.lower().startswith("x-")}
 
 
 def _classify_dispatch_error(exc: Exception) -> str:
@@ -103,10 +153,40 @@ def _pick_payload_by_filter(item: dict[str, Any], payload: dict[str, Any]) -> di
 async def dispatch_webhook_with_retry(*, payload: dict[str, Any], request_id: str, item: dict[str, Any], test_mode: bool = False) -> dict[str, Any]:
     instance_name = str(payload.get("instance") or "")
     webhook_id = str(item.get("id") or "")
+    webhook_name = str(item.get("name") or webhook_id or "webhook")
     dispatch_id = str(payload.get("dispatchId") or f"disp_{request_id}_{webhook_id[:6]}")
     message_id = str(((payload.get("message") or {}).get("id") or payload.get("messageId") or ""))
+    conversation_id = str(((payload.get("meta") or {}).get("conversationId") or (payload.get("trace") or {}).get("conversationId") or ""))
+    event_type = str(payload.get("event") or payload.get("subtype") or payload.get("type") or "UNKNOWN")
     url = str(item.get("url") or "")
     if not url.startswith(("http://", "https://")):
+        append_dispatch_history(
+            instance_name,
+            webhook_id,
+            {
+                "timestamp": int(time.time() * 1000),
+                "dispatchId": dispatch_id,
+                "webhookId": webhook_id,
+                "webhookName": webhook_name,
+                "instanceName": instance_name,
+                "destinationUrl": url,
+                "eventType": event_type,
+                "messageId": message_id or None,
+                "conversationId": conversation_id or None,
+                "status": "invalid_url",
+                "success": False,
+                "failure": True,
+                "statusCode": 0,
+                "durationMs": 0.0,
+                "attemptCount": 1,
+                "retryCount": 0,
+                "error": "invalid webhook url",
+                "errorType": "invalid_url",
+                "request": {"method": "POST", "headers": {}, "payloadSummary": _payload_summary(payload), "payloadSizeBytes": 0, "payloadPreview": "", "payloadTruncated": False},
+                "response": {"headers": {}, "bodyPreview": ""},
+                "attempts": [{"attempt": 1, "success": False, "statusCode": 0, "errorType": "invalid_url", "error": "invalid webhook url", "durationMs": 0.0}],
+            },
+        )
         return {"ok": False, "status": "invalid_url", "statusCode": 0, "retriesUsed": 0, "latencyMs": 0.0}
 
     target_payload = _pick_payload_by_filter(item, payload)
@@ -118,6 +198,7 @@ async def dispatch_webhook_with_retry(*, payload: dict[str, Any], request_id: st
     verbose = _should_verbose_dispatch_logs()
     payload_json = json.dumps(target_payload, ensure_ascii=True, default=str)
     payload_size = len(payload_json.encode("utf-8"))
+    payload_preview, payload_truncated = _serialize_payload_preview(target_payload)
     logger.info(
         "bot_webhook_dispatch_request",
         request_id=request_id,
@@ -148,6 +229,7 @@ async def dispatch_webhook_with_retry(*, payload: dict[str, Any], request_id: st
     retries_used = 0
     retryable = False
     started = time.perf_counter()
+    attempts_log: list[dict[str, Any]] = []
     debug_enabled = verbose
     if debug_enabled:
         logger.info(
@@ -155,7 +237,7 @@ async def dispatch_webhook_with_retry(*, payload: dict[str, Any], request_id: st
             request_id=request_id,
             dispatch_id=dispatch_id,
             webhook_id=webhook_id,
-            payload_preview=payload_json[:800],
+            payload_preview=payload_preview[:800],
             headers_preview=mask_headers_for_log(headers),
         )
 
@@ -163,6 +245,8 @@ async def dispatch_webhook_with_retry(*, payload: dict[str, Any], request_id: st
         exc: Exception | None = None
         code: int | None = None
         response_snippet = ""
+        response_headers: dict[str, str] = {}
+        attempt_started = time.perf_counter()
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 if verbose:
@@ -177,7 +261,10 @@ async def dispatch_webhook_with_retry(*, payload: dict[str, Any], request_id: st
                     )
                 resp = await client.post(url, json=target_payload, headers=headers)
             code = int(resp.status_code)
-            response_snippet = (resp.text or "")[:220]
+            response_snippet = (resp.text or "")[:_MAX_RESPONSE_PREVIEW_CHARS]
+            response_headers = _response_headers_summary(resp.headers)
+            attempt_duration_ms = round((time.perf_counter() - attempt_started) * 1000, 2)
+            attempt_error_type = _classify_http_error(code)
             logger.info(
                 "bot_webhook_dispatch_response",
                 request_id=request_id,
@@ -185,20 +272,19 @@ async def dispatch_webhook_with_retry(*, payload: dict[str, Any], request_id: st
                 webhook_id=webhook_id,
                 status_code=code,
                 retry_attempt=attempt - 1,
-                response_headers=dict(resp.headers) if verbose else {},
+                response_headers=response_headers if verbose else {},
                 response_body_preview=response_snippet,
             )
             if 200 <= code < 300:
                 latency_ms = round((time.perf_counter() - started) * 1000, 2)
-                mark_dispatch_result_ex(
-                    instance_name,
-                    webhook_id,
-                    status=_status_name(code, None),
-                    error=None,
-                    status_code=code,
-                    latency_ms=latency_ms,
-                    retries_used=retries_used,
-                    retryable=False,
+                attempts_log.append(
+                    {
+                        "attempt": attempt,
+                        "success": True,
+                        "statusCode": code,
+                        "durationMs": attempt_duration_ms,
+                        "response": {"headers": response_headers, "bodyPreview": response_snippet},
+                    }
                 )
                 logger.info(
                     "bot_webhook_dispatch_success",
@@ -217,31 +303,44 @@ async def dispatch_webhook_with_retry(*, payload: dict[str, Any], request_id: st
                     webhook_id,
                     {
                         "timestamp": int(time.time() * 1000),
+                        "webhookId": webhook_id,
+                        "webhookName": webhook_name,
+                        "instanceName": instance_name,
+                        "destinationUrl": url,
+                        "eventType": event_type,
                         "status": "success",
+                        "success": True,
+                        "failure": False,
                         "dispatchId": dispatch_id,
                         "messageId": message_id or None,
+                        "conversationId": conversation_id or None,
                         "eventSubtype": target_payload.get("subtype"),
+                        "attemptCount": attempt,
                         "retryCount": retries_used,
+                        "statusCode": code,
                         "responseCode": code,
                         "durationMs": latency_ms,
-                        "webhookUrl": url,
                         "request": {
                             "method": "POST",
                             "headers": mask_headers_for_log(headers),
                             "payloadSummary": _payload_summary(target_payload),
                             "payloadSizeBytes": payload_size,
+                            "payloadPreview": payload_preview,
+                            "payloadTruncated": payload_truncated,
                         },
                         "response": {
-                            "headers": dict(resp.headers),
+                            "headers": response_headers,
                             "bodyPreview": response_snippet,
                         },
+                        "attempts": attempts_log,
                     },
                 )
                 return {"ok": True, "status": f"ok_{code}", "statusCode": code, "retriesUsed": retries_used, "latencyMs": latency_ms}
         except Exception as caught:
             exc = caught
-            response_snippet = str(caught)[:220]
+            response_snippet = str(caught)[:_MAX_RESPONSE_PREVIEW_CHARS]
             error_type = _classify_dispatch_error(caught)
+            attempt_duration_ms = round((time.perf_counter() - attempt_started) * 1000, 2)
             logger.error(
                 "bot_webhook_dispatch_fail",
                 request_id=request_id,
@@ -266,7 +365,24 @@ async def dispatch_webhook_with_retry(*, payload: dict[str, Any], request_id: st
         last_code = code
         last_exc = exc
         last_error = response_snippet
+        if code is not None:
+            last_error_type = _classify_http_error(code)
+        elif exc is not None:
+            last_error_type = _classify_dispatch_error(exc)
+        else:
+            last_error_type = None
         final = attempt == attempts or not retryable
+        attempt_error_type = last_error_type
+        attempt_entry = {
+            "attempt": attempt,
+            "success": bool(code is not None and 200 <= code < 300),
+            "statusCode": int(code or 0),
+            "durationMs": attempt_duration_ms,
+            "errorType": attempt_error_type,
+            "error": response_snippet or None,
+            "response": {"headers": response_headers, "bodyPreview": response_snippet},
+        }
+        attempts_log.append(attempt_entry)
         if not final:
             backoff = _RETRY_BACKOFF_SECONDS[min(attempt - 1, len(_RETRY_BACKOFF_SECONDS) - 1)]
             retries_used += 1
@@ -291,15 +407,45 @@ async def dispatch_webhook_with_retry(*, payload: dict[str, Any], request_id: st
 
     latency_ms = round((time.perf_counter() - started) * 1000, 2)
     status_name = _status_name(last_code, last_exc)
-    mark_dispatch_result_ex(
+    last_error_type = _classify_http_error(last_code) if last_code is not None else (_classify_dispatch_error(last_exc) if last_exc is not None else None)
+    append_dispatch_history(
         instance_name,
         webhook_id,
-        status=status_name,
-        error=last_error,
-        status_code=last_code,
-        latency_ms=latency_ms,
-        retries_used=retries_used,
-        retryable=retryable,
+        {
+            "timestamp": int(time.time() * 1000),
+            "dispatchId": dispatch_id,
+            "webhookId": webhook_id,
+            "webhookName": webhook_name,
+            "instanceName": instance_name,
+            "destinationUrl": url,
+            "eventType": event_type,
+            "messageId": message_id or None,
+            "conversationId": conversation_id or None,
+            "status": status_name,
+            "success": False,
+            "failure": True,
+            "statusCode": int(last_code or 0),
+            "responseCode": int(last_code or 0),
+            "durationMs": latency_ms,
+            "attemptCount": len(attempts_log) or 1,
+            "retryCount": retries_used,
+            "error": last_error,
+            "errorType": last_error_type,
+            "retryable": retryable,
+            "request": {
+                "method": "POST",
+                "headers": mask_headers_for_log(headers),
+                "payloadSummary": _payload_summary(target_payload),
+                "payloadSizeBytes": payload_size,
+                "payloadPreview": payload_preview,
+                "payloadTruncated": payload_truncated,
+            },
+            "response": {
+                "headers": response_headers,
+                "bodyPreview": last_error if last_code is None else response_snippet,
+            },
+            "attempts": attempts_log,
+        },
     )
     if str(status_name).startswith("http_"):
         logger.warning(

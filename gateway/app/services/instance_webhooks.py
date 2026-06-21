@@ -8,12 +8,14 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 _LOCK = threading.Lock()
+_DEFAULT_EVENT_FILTERS = {"business": True, "transport": False, "operational": False}
 
 AuthType = Literal["NONE", "BEARER", "API_KEY", "BASIC", "CUSTOM_HEADERS"]
 
@@ -78,6 +80,118 @@ def _sanitize_auth_config(raw: Any) -> dict[str, str]:
     return out
 
 
+def _coerce_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _coerce_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _default_webhook_name(instance_name: str, record: dict[str, Any]) -> str:
+    explicit = str(record.get("name") or "").strip()
+    if explicit:
+        return explicit[:120]
+    parsed = urlparse(str(record.get("url") or "").strip())
+    host = (parsed.netloc or parsed.hostname or "").strip()
+    if host:
+        return host[:120]
+    fallback_id = str(record.get("id") or "webhook")[:8]
+    return f"{instance_name}-{fallback_id}"
+
+
+def _sanitize_dispatch_history_entry(record: dict[str, Any]) -> dict[str, Any]:
+    request = record.get("request") if isinstance(record.get("request"), dict) else {}
+    response = record.get("response") if isinstance(record.get("response"), dict) else {}
+    attempts = record.get("attempts") if isinstance(record.get("attempts"), list) else []
+    return {
+        "timestamp": _coerce_int(record.get("timestamp"), int(time.time() * 1000)),
+        "dispatchId": str(record.get("dispatchId") or "").strip() or None,
+        "webhookId": str(record.get("webhookId") or "").strip() or None,
+        "webhookName": str(record.get("webhookName") or "").strip() or None,
+        "instanceName": str(record.get("instanceName") or "").strip() or None,
+        "destinationUrl": str(record.get("destinationUrl") or record.get("webhookUrl") or "").strip() or None,
+        "eventType": str(record.get("eventType") or record.get("eventSubtype") or "").strip() or None,
+        "messageId": str(record.get("messageId") or "").strip() or None,
+        "conversationId": str(record.get("conversationId") or "").strip() or None,
+        "status": str(record.get("status") or "").strip() or "failed",
+        "success": bool(record.get("success")),
+        "failure": bool(record.get("failure", not bool(record.get("success")))),
+        "statusCode": record.get("statusCode", record.get("responseCode")),
+        "responseCode": record.get("responseCode", record.get("statusCode")),
+        "durationMs": _coerce_float(record.get("durationMs")),
+        "attemptCount": max(1, _coerce_int(record.get("attemptCount"), len(attempts) or 1)),
+        "retryCount": max(0, _coerce_int(record.get("retryCount"))),
+        "error": str(record.get("error") or "").strip() or None,
+        "errorType": str(record.get("errorType") or "").strip() or None,
+        "request": {
+            "method": str(request.get("method") or "POST"),
+            "headers": request.get("headers") if isinstance(request.get("headers"), dict) else {},
+            "payloadSummary": request.get("payloadSummary") if isinstance(request.get("payloadSummary"), dict) else {},
+            "payloadSizeBytes": _coerce_int(request.get("payloadSizeBytes")),
+            "payloadPreview": str(request.get("payloadPreview") or "")[:4000],
+            "payloadTruncated": bool(request.get("payloadTruncated")),
+        },
+        "response": {
+            "headers": response.get("headers") if isinstance(response.get("headers"), dict) else {},
+            "bodyPreview": str(response.get("bodyPreview") or "")[:2000],
+        },
+        "attempts": [item for item in attempts if isinstance(item, dict)][:10],
+    }
+
+
+def _apply_dispatch_aggregate_fields(item: dict[str, Any], *, status: str, error: str | None, status_code: int | None, latency_ms: float | None, retries_used: int, retryable: bool | None) -> dict[str, Any]:
+    now = _now_iso()
+    prev_success = int(item.get("successCount") or 0)
+    prev_failure = int(item.get("failureCount") or 0)
+    prev_retry = int(item.get("retryCount") or 0)
+    prev_unhealthy = int(item.get("unhealthyCount") or 0)
+    prev_consecutive = int(item.get("consecutiveFailures") or 0)
+    prev_avg = float(item.get("avgLatencyMs") or 0.0)
+    was_unhealthy = str(item.get("healthStatus") or "").lower() == "unhealthy"
+    is_success = str(status).startswith("ok_") or status == "success"
+    next_success = prev_success + (1 if is_success else 0)
+    next_failure = prev_failure + (0 if is_success else 1)
+    next_retry = prev_retry + max(0, int(retries_used or 0))
+    next_consecutive = 0 if is_success else (prev_consecutive + 1)
+    sample_count = next_success + next_failure
+    next_avg = prev_avg
+    if latency_ms is not None:
+        next_avg = ((prev_avg * max(0, sample_count - 1)) + float(latency_ms)) / max(1, sample_count)
+    next_health = "healthy"
+    if next_consecutive >= 5:
+        next_health = "unhealthy"
+    elif next_consecutive > 0:
+        next_health = "degraded"
+    next_unhealthy_count = prev_unhealthy + (1 if (next_health == "unhealthy" and not was_unhealthy) else 0)
+    return {
+        **item,
+        "lastUsedAt": now,
+        "lastStatus": status,
+        "lastError": (error or "")[:300] if error else None,
+        "lastStatusCode": status_code,
+        "lastLatencyMs": latency_ms,
+        "lastSuccessAt": now if is_success else item.get("lastSuccessAt"),
+        "lastFailureAt": now if not is_success else item.get("lastFailureAt"),
+        "avgLatencyMs": round(next_avg, 2),
+        "consecutiveFailures": next_consecutive,
+        "healthStatus": next_health,
+        "unhealthy": next_health == "unhealthy",
+        "successCount": next_success,
+        "failureCount": next_failure,
+        "retryCount": next_retry,
+        "unhealthyCount": next_unhealthy_count,
+        "updatedAt": now,
+        "lastRetryable": retryable,
+    }
+
+
 def _sanitize_webhook(instance_name: str, record: dict[str, Any]) -> dict[str, Any]:
     auth_type = str(record.get("authType") or "NONE").upper()
     if auth_type not in {"NONE", "BEARER", "API_KEY", "BASIC", "CUSTOM_HEADERS"}:
@@ -101,6 +215,7 @@ def _sanitize_webhook(instance_name: str, record: dict[str, Any]) -> dict[str, A
     return {
         "id": str(record.get("id") or str(uuid.uuid4())[:16]),
         "instanceId": instance_name,
+        "name": _default_webhook_name(instance_name, record),
         "url": str(record.get("url") or "").strip(),
         "enabled": bool(record.get("enabled", True)),
         "authType": auth_type,
@@ -125,10 +240,8 @@ def _sanitize_webhook(instance_name: str, record: dict[str, Any]) -> dict[str, A
         "unhealthyCount": max(0, unhealthy_count),
         "eventFilters": record.get("eventFilters")
         if isinstance(record.get("eventFilters"), dict)
-        else {"business": True, "transport": False, "operational": False},
-        "dispatchHistory": record.get("dispatchHistory")
-        if isinstance(record.get("dispatchHistory"), list)
-        else [],
+        else dict(_DEFAULT_EVENT_FILTERS),
+        "dispatchHistory": [_sanitize_dispatch_history_entry(item) for item in record.get("dispatchHistory", []) if isinstance(item, dict)],
     }
 
 
@@ -199,6 +312,7 @@ def get_webhook(instance_name: str, webhook_id: str, reveal_secrets: bool = Fals
 def create_webhook(
     instance_name: str,
     *,
+    name: str | None,
     url: str,
     enabled: bool,
     auth_type: AuthType,
@@ -212,12 +326,13 @@ def create_webhook(
         {
             "id": str(uuid.uuid4())[:16],
             "instanceId": instance_name,
+            "name": name,
             "url": url,
             "enabled": enabled,
             "authType": auth_type,
             "authConfig": auth_config or {},
             "customHeaders": custom_headers or {},
-            "eventFilters": event_filters if isinstance(event_filters, dict) else {"business": True, "transport": False, "operational": False},
+            "eventFilters": event_filters if isinstance(event_filters, dict) else dict(_DEFAULT_EVENT_FILTERS),
             "createdAt": now,
             "updatedAt": now,
             "lastUsedAt": None,
@@ -235,7 +350,7 @@ def create_webhook(
             "failureCount": 0,
             "retryCount": 0,
             "unhealthyCount": 0,
-            "eventFilters": {"business": True, "transport": False, "operational": False},
+            "eventFilters": event_filters if isinstance(event_filters, dict) else dict(_DEFAULT_EVENT_FILTERS),
         },
     )
     with _LOCK:
@@ -253,6 +368,7 @@ def update_webhook(
     instance_name: str,
     webhook_id: str,
     *,
+    name: str | None,
     url: str,
     enabled: bool,
     auth_type: AuthType,
@@ -272,6 +388,7 @@ def update_webhook(
                 instance_name,
                 {
                     **item,
+                    "name": name or item.get("name"),
                     "url": url,
                     "enabled": enabled,
                     "authType": auth_type,
@@ -297,7 +414,7 @@ def set_webhook_filters(instance_name: str, webhook_id: str, event_filters: dict
     allowed = {"business", "transport", "operational"}
     normalized = {k: bool(v) for k, v in event_filters.items() if k in allowed}
     if not normalized:
-        normalized = {"business": True, "transport": False, "operational": False}
+        normalized = dict(_DEFAULT_EVENT_FILTERS)
     with _LOCK:
         store = _read_store_unlocked()
         hooks = store["instances"].get(instance_name)
@@ -416,6 +533,25 @@ def mark_dispatch_result_ex(
         hooks = store["instances"].get(instance_name)
         if not isinstance(hooks, list):
             return
+        for idx, item in enumerate(hooks):
+            if not isinstance(item, dict) or str(item.get("id")) != webhook_id:
+                continue
+            merged = _sanitize_webhook(
+                instance_name,
+                _apply_dispatch_aggregate_fields(
+                    item,
+                    status=status,
+                    error=error,
+                    status_code=status_code,
+                    latency_ms=latency_ms,
+                    retries_used=retries_used,
+                    retryable=retryable,
+                ),
+            )
+            hooks[idx] = merged
+            store["instances"][instance_name] = hooks
+            _write_store_unlocked(store)
+            return
 
 
 def append_dispatch_history(
@@ -433,69 +569,23 @@ def append_dispatch_history(
             if not isinstance(item, dict) or str(item.get("id")) != webhook_id:
                 continue
             history = item.get("dispatchHistory") if isinstance(item.get("dispatchHistory"), list) else []
-            history.insert(0, entry)
+            history.insert(0, _sanitize_dispatch_history_entry(entry))
             history = history[:limit]
             merged = _sanitize_webhook(
                 instance_name,
-                {
-                    **item,
-                    "dispatchHistory": history,
-                    "updatedAt": _now_iso(),
-                },
-            )
-            hooks[idx] = merged
-            store["instances"][instance_name] = hooks
-            _write_store_unlocked(store)
-            return
-        for idx, item in enumerate(hooks):
-            if not isinstance(item, dict) or str(item.get("id")) != webhook_id:
-                continue
-            now = _now_iso()
-            prev_success = int(item.get("successCount") or 0)
-            prev_failure = int(item.get("failureCount") or 0)
-            prev_retry = int(item.get("retryCount") or 0)
-            prev_unhealthy = int(item.get("unhealthyCount") or 0)
-            prev_consecutive = int(item.get("consecutiveFailures") or 0)
-            prev_avg = float(item.get("avgLatencyMs") or 0.0)
-            was_unhealthy = str(item.get("healthStatus") or "").lower() == "unhealthy"
-            is_success = str(status).startswith("ok_")
-            next_success = prev_success + (1 if is_success else 0)
-            next_failure = prev_failure + (0 if is_success else 1)
-            next_retry = prev_retry + max(0, int(retries_used or 0))
-            next_consecutive = 0 if is_success else (prev_consecutive + 1)
-            sample_count = next_success + next_failure
-            next_avg = prev_avg
-            if latency_ms is not None:
-                next_avg = ((prev_avg * max(0, sample_count - 1)) + float(latency_ms)) / max(1, sample_count)
-            next_health = "healthy"
-            if next_consecutive >= 5:
-                next_health = "unhealthy"
-            elif next_consecutive > 0:
-                next_health = "degraded"
-            next_unhealthy_count = prev_unhealthy + (1 if (next_health == "unhealthy" and not was_unhealthy) else 0)
-
-            merged = _sanitize_webhook(
-                instance_name,
-                {
-                    **item,
-                    "lastUsedAt": now,
-                    "lastStatus": status,
-                    "lastError": (error or "")[:300] if error else None,
-                    "lastStatusCode": status_code,
-                    "lastLatencyMs": latency_ms,
-                    "lastSuccessAt": now if is_success else item.get("lastSuccessAt"),
-                    "lastFailureAt": now if not is_success else item.get("lastFailureAt"),
-                    "avgLatencyMs": round(next_avg, 2),
-                    "consecutiveFailures": next_consecutive,
-                    "healthStatus": next_health,
-                    "unhealthy": next_health == "unhealthy",
-                    "successCount": next_success,
-                    "failureCount": next_failure,
-                    "retryCount": next_retry,
-                    "unhealthyCount": next_unhealthy_count,
-                    "updatedAt": now,
-                    "lastRetryable": retryable,
-                },
+                _apply_dispatch_aggregate_fields(
+                    {
+                        **item,
+                        "dispatchHistory": history,
+                        "updatedAt": _now_iso(),
+                    },
+                    status=str(entry.get("status") or "failed"),
+                    error=str(entry.get("error") or "") or None,
+                    status_code=entry.get("statusCode") if isinstance(entry.get("statusCode"), int) else entry.get("responseCode"),
+                    latency_ms=_coerce_float(entry.get("durationMs"), None),
+                    retries_used=_coerce_int(entry.get("retryCount")),
+                    retryable=entry.get("retryable") if isinstance(entry.get("retryable"), bool) else None,
+                ),
             )
             hooks[idx] = merged
             store["instances"][instance_name] = hooks
@@ -512,3 +602,62 @@ def mask_headers_for_log(headers: dict[str, str]) -> dict[str, str]:
         else:
             safe[key] = value
     return safe
+
+
+def list_webhook_dispatches(instance_name: str, webhook_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
+    item = get_webhook(instance_name, webhook_id, reveal_secrets=False)
+    if not item:
+        return []
+    history = item.get("dispatchHistory") if isinstance(item.get("dispatchHistory"), list) else []
+    return history[: max(1, min(limit, 200))]
+
+
+def list_recent_dispatches(instance_name: str, *, limit: int = 50, success: bool | None = None) -> list[dict[str, Any]]:
+    hooks = list_instance_webhooks(instance_name, reveal_secrets=False)
+    items: list[dict[str, Any]] = []
+    for hook in hooks:
+        history = hook.get("dispatchHistory") if isinstance(hook.get("dispatchHistory"), list) else []
+        for row in history:
+            if not isinstance(row, dict):
+                continue
+            row_success = bool(row.get("success"))
+            if success is not None and row_success != success:
+                continue
+            items.append(
+                {
+                    **row,
+                    "webhookId": row.get("webhookId") or hook.get("id"),
+                    "webhookName": row.get("webhookName") or hook.get("name"),
+                    "instanceName": row.get("instanceName") or hook.get("instanceId") or instance_name,
+                    "destinationUrl": row.get("destinationUrl") or hook.get("url"),
+                }
+            )
+    items.sort(key=lambda value: _coerce_int(value.get("timestamp")), reverse=True)
+    return items[: max(1, min(limit, 300))]
+
+
+def get_dispatch_metrics(instance_name: str) -> dict[str, Any]:
+    hooks = list_instance_webhooks(instance_name, reveal_secrets=False)
+    total_deliveries = 0
+    successful_deliveries = 0
+    failed_deliveries = 0
+    retries = 0
+    weighted_latency = 0.0
+    for hook in hooks:
+        success_count = max(0, _coerce_int(hook.get("successCount")))
+        failure_count = max(0, _coerce_int(hook.get("failureCount")))
+        count = success_count + failure_count
+        total_deliveries += count
+        successful_deliveries += success_count
+        failed_deliveries += failure_count
+        retries += max(0, _coerce_int(hook.get("retryCount")))
+        weighted_latency += _coerce_float(hook.get("avgLatencyMs")) * count
+    average_response_time = round(weighted_latency / total_deliveries, 2) if total_deliveries > 0 else 0.0
+    return {
+        "instanceName": instance_name,
+        "totalDeliveries": total_deliveries,
+        "successfulDeliveries": successful_deliveries,
+        "failedDeliveries": failed_deliveries,
+        "retries": retries,
+        "averageResponseTimeMs": average_response_time,
+    }

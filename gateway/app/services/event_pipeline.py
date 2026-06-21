@@ -4,11 +4,13 @@ import time
 from collections import defaultdict
 from typing import Any
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.services.normalization import normalize_webhook, save_event, save_pipeline_event, save_raw_event
 from app.services.reliability import conversation_id, inbound_dedupe, is_flood, looks_like_outbound_echo, message_fingerprint
 
 logger = get_logger(__name__)
+settings = get_settings()
 
 _pipeline_counters: dict[str, int] = defaultdict(int)
 _unknown_type_counters: dict[str, int] = defaultdict(int)
@@ -23,6 +25,19 @@ def snapshot_pipeline_metrics() -> dict[str, Any]:
 
 def _inc(name: str, value: int = 1) -> None:
     _pipeline_counters[name] += value
+
+
+def _event_age_seconds(normalized: dict[str, Any], now_ms: int) -> int | None:
+    source_timestamp = normalized.get("sourceTimestamp")
+    if source_timestamp is None:
+        return None
+    try:
+        source_ms = int(source_timestamp)
+    except (TypeError, ValueError):
+        return None
+    if source_ms <= 0:
+        return None
+    return max(0, now_ms - source_ms) // 1000
 
 
 def _category_of(normalized: dict[str, Any]) -> str:
@@ -65,6 +80,7 @@ def _enrich_contract(
     normalized["transport"] = {
         "sourceEvent": normalized.get("sourceEvent"),
         "event": normalized.get("event"),
+        "sourceTimestamp": normalized.get("sourceTimestamp"),
     }
     normalized["operational"] = {
         "pipeline": trace,
@@ -96,12 +112,6 @@ def process_incoming_webhook(payload: dict[str, Any], request_id: str) -> dict[s
     classification = _classify(payload, normalized)
     trace["classify"] = {"status": "ok", **classification}
 
-    try:
-        save_raw_event({"requestId": request_id, "payload": payload, "normalized": normalized, "timestamp": int(time.time() * 1000)})
-    except Exception as exc:
-        trace["ingest"]["rawPersistError"] = str(exc)
-        logger.warning("pipeline_raw_event_persist_fail", request_id=request_id, instance=instance, error=str(exc))
-
     if classification.get("fallbackUsed"):
         _inc("normalization_fallback_total")
     if bool((normalized.get("metadata") or {}).get("unknownTypeDetected")):
@@ -129,6 +139,52 @@ def process_incoming_webhook(payload: dict[str, Any], request_id: str) -> dict[s
 
     event = str(normalized.get("event") or payload.get("event") or "UNKNOWN")
     save_pipeline_event(stage="ingest", status="ok", instance=instance, request_id=request_id, event=event)
+
+    max_age_seconds = max(0, int(settings.max_event_age_seconds or 0))
+    event_age_seconds = _event_age_seconds(normalized, started_at)
+    if event_age_seconds is not None:
+        trace["age"] = {
+            "status": "ok",
+            "ageSeconds": event_age_seconds,
+            "maxAgeSeconds": max_age_seconds,
+            "sourceTimestamp": normalized.get("sourceTimestamp"),
+        }
+    elif max_age_seconds > 0:
+        trace["age"] = {"status": "missing_source_timestamp", "maxAgeSeconds": max_age_seconds}
+        _inc("stale_guard_missing_timestamp_total")
+    if max_age_seconds > 0 and event_age_seconds is not None and event_age_seconds > max_age_seconds:
+        logger.warning(
+            "event dropped: stale message",
+            request_id=request_id,
+            instance=instance,
+            source_event=event,
+            message_id=msg_id or None,
+            age_seconds=event_age_seconds,
+            max_age_seconds=max_age_seconds,
+        )
+        save_pipeline_event(
+            stage="stale_guard",
+            status="dropped_stale",
+            instance=instance,
+            message_id=msg_id or None,
+            conversation_id=conv_id,
+            request_id=request_id,
+            event=event,
+            details={
+                "ageSeconds": event_age_seconds,
+                "maxAgeSeconds": max_age_seconds,
+                "sourceTimestamp": normalized.get("sourceTimestamp"),
+            },
+        )
+        trace["route"] = {"status": "dropped", "reason": "stale_event", "ageSeconds": event_age_seconds}
+        _inc("stale_dropped_total")
+        return {"status": "stale_dropped", "normalized": normalized, "trace": trace, "classification": classification}
+
+    try:
+        save_raw_event({"requestId": request_id, "payload": payload, "normalized": normalized, "timestamp": int(time.time() * 1000)})
+    except Exception as exc:
+        trace["ingest"]["rawPersistError"] = str(exc)
+        logger.warning("pipeline_raw_event_persist_fail", request_id=request_id, instance=instance, error=str(exc))
 
     if event in {"MESSAGES_UPSERT", "SEND_MESSAGE"}:
         logger.info(

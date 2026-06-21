@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     dedupe_ttl_seconds: int = 180
     dedupe_max_items: int = 20000
     outbound_echo_ttl_seconds: int = 45
+    max_event_age_seconds: int = 600
     flood_window_seconds: int = 3
     flood_max_messages: int = 12
     webhook_event_retention: int = 2000

@@ -52,6 +52,7 @@ La API queda disponible en `http://localhost:8080` (o el puerto que configuraste
 | `POSTGRES_PASSWORD` | Contraseña de PostgreSQL. Generá con `openssl rand -hex 16` |
 | `REDIS_PASSWORD` | Contraseña de Redis. Generá con `openssl rand -hex 16` |
 | `GATEWAY_API_KEY` | Clave que usa el bot para autenticarse al gateway |
+| `MAX_EVENT_AGE_SECONDS` | Edad máxima aceptable de eventos entrantes antes de descartarlos (`0` deshabilita, recomendado `600`) |
 
 Las demás variables tienen valores por defecto funcionales para desarrollo local.
 

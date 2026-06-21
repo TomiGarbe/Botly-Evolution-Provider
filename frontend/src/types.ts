@@ -161,6 +161,7 @@ export type WebhookAuthType = 'NONE' | 'BEARER' | 'API_KEY' | 'BASIC' | 'CUSTOM_
 export interface InstanceWebhook {
   id: string
   instanceId: string
+  name?: string
   url: string
   enabled: boolean
   authType: WebhookAuthType
@@ -191,25 +192,58 @@ export interface InstanceWebhook {
   dispatchHistory?: WebhookDispatchLog[]
 }
 
+export interface WebhookDeliveryMetrics {
+  instanceName: string
+  totalDeliveries: number
+  successfulDeliveries: number
+  failedDeliveries: number
+  retries: number
+  averageResponseTimeMs: number
+}
+
 export interface WebhookDispatchLog {
   timestamp: number
+  webhookId?: string | null
+  webhookName?: string | null
+  instanceName?: string | null
+  destinationUrl?: string | null
+  eventType?: string | null
   status: string
+  success?: boolean
+  failure?: boolean
   dispatchId?: string
   messageId?: string | null
+  conversationId?: string | null
   eventSubtype?: string | null
+  attemptCount?: number
   retryCount?: number
+  statusCode?: number
   responseCode?: number
   durationMs?: number
   error?: string | null
-  webhookUrl?: string
+  errorType?: string | null
   request?: {
     method?: string
     headers?: Record<string, string>
     payloadSummary?: Record<string, unknown>
     payloadSizeBytes?: number
+    payloadPreview?: string
+    payloadTruncated?: boolean
   }
   response?: {
     headers?: Record<string, string>
     bodyPreview?: string
   }
+  attempts?: Array<{
+    attempt: number
+    success?: boolean
+    statusCode?: number
+    durationMs?: number
+    errorType?: string | null
+    error?: string | null
+    response?: {
+      headers?: Record<string, string>
+      bodyPreview?: string
+    }
+  }>
 }

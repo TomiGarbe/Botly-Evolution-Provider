@@ -85,6 +85,7 @@ WebhookAuthType = Literal["NONE", "BEARER", "API_KEY", "BASIC", "CUSTOM_HEADERS"
 
 
 class WebhookConfigRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
     url: str = Field(..., min_length=8, max_length=2048)
     enabled: bool = True
     authType: WebhookAuthType = "NONE"

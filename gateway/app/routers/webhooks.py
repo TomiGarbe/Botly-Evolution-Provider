@@ -16,7 +16,7 @@ from app.services.instance_webhooks import (
     list_instance_webhooks,
 )
 from app.services.event_pipeline import process_incoming_webhook, snapshot_pipeline_metrics
-from app.services.normalization import list_events, normalize_webhook, save_event, save_pipeline_event
+from app.services.normalization import list_events, save_pipeline_event
 from app.services.webhook_delivery import dispatch_webhook_with_retry
 from app.services.webhook_delivery import diagnose_webhook_target
 from app.services.evolution_auth import auth_runtime_snapshot, extract_evolution_auth, validate_evolution_auth
@@ -351,36 +351,6 @@ async def receive_webhook(request: Request):
     else:
         logger.info("evolution_webhook_auth_success", instance=instance, source=provided_source, mode=auth_validation["mode"])
 
-    try:
-        normalized_timeline = normalize_webhook(payload)
-        if normalized_timeline.get("layer") == "business":
-            save_event(normalized_timeline)
-            logger.info(
-                "[TIMELINE][INGEST] event persisted from evolution",
-                request_id=request_id,
-                instance=instance,
-                source_event=payload.get("event"),
-                direction=normalized_timeline.get("direction"),
-                subtype=normalized_timeline.get("subtype"),
-                message_id=((normalized_timeline.get("message") or {}).get("id")),
-            )
-        else:
-            logger.info(
-                "[TIMELINE][INGEST] filtered non-business event",
-                request_id=request_id,
-                instance=instance,
-                source_event=payload.get("event"),
-                reason=normalized_timeline.get("reason"),
-            )
-    except Exception as exc:
-        logger.warning(
-            "[TIMELINE][INGEST] normalize failed",
-            request_id=request_id,
-            instance=instance,
-            source_event=payload.get("event"),
-            error=str(exc),
-        )
-
     logger.debug("webhook_received", request_id=request_id, source_event=payload.get("event"), instance=instance)
     logger.info("[OUTBOUND][WEBHOOK] evolution webhook received", request_id=request_id, instance=instance, source_event=payload.get("event"))
     pipeline_result = process_incoming_webhook(payload, request_id)
@@ -399,6 +369,8 @@ async def receive_webhook(request: Request):
     if pipeline_result.get("status") == "normalize_error":
         logger.error("webhook_normalize_error", request_id=request_id, instance=instance)
         return {"status": "normalize_error"}
+    if pipeline_result.get("status") == "stale_dropped":
+        return {"status": "stale_dropped"}
     if pipeline_result.get("status") in {"duplicate", "duplicate_fp", "echo_filtered", "throttled"}:
         return {"status": pipeline_result.get("status")}
 

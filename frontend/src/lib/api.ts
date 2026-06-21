@@ -1,5 +1,5 @@
 import type { GatewayConfig } from './config'
-import type { Instance, InstanceApiKey, InstanceCreationResult, InstanceState, QRResponse, InstanceWebhook, WebhookAuthType, WebhookDispatchLog } from '../types'
+import type { Instance, InstanceApiKey, InstanceState, QRResponse, InstanceWebhook, WebhookAuthType, WebhookDeliveryMetrics, WebhookDispatchLog } from '../types'
 
 const DEFAULT_TIMEOUT_MS = 10000
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504])
@@ -198,7 +198,7 @@ export const api = {
     create: (
       cfg: GatewayConfig,
       instanceName: string,
-      body: { url: string; enabled: boolean; authType: WebhookAuthType; authConfig: Record<string, string>; customHeaders: Record<string, string> }
+      body: { name?: string; url: string; enabled: boolean; authType: WebhookAuthType; authConfig: Record<string, string>; customHeaders: Record<string, string> }
     ) => {
       assertInstanceName(instanceName)
       return request<InstanceWebhook>(cfg, 'POST', `/instances/${instanceName}/webhooks`, body)
@@ -207,7 +207,7 @@ export const api = {
       cfg: GatewayConfig,
       instanceName: string,
       webhookId: string,
-      body: { url: string; enabled: boolean; authType: WebhookAuthType; authConfig: Record<string, string>; customHeaders: Record<string, string> }
+      body: { name?: string; url: string; enabled: boolean; authType: WebhookAuthType; authConfig: Record<string, string>; customHeaders: Record<string, string> }
     ) => {
       assertInstanceName(instanceName)
       return request<InstanceWebhook>(cfg, 'PUT', `/instances/${instanceName}/webhooks/${encodeURIComponent(webhookId)}`, body)
@@ -230,6 +230,14 @@ export const api = {
         cfg,
         'GET',
         `/instances/${instanceName}/webhooks/${encodeURIComponent(webhookId)}/dispatches?limit=${Math.max(1, Math.min(limit, 100))}`
+      )
+    },
+    deliveries: (cfg: GatewayConfig, instanceName: string, limit = 50, outcome: 'all' | 'success' | 'failed' = 'all') => {
+      assertInstanceName(instanceName)
+      return request<{ items: WebhookDispatchLog[]; metrics: WebhookDeliveryMetrics }>(
+        cfg,
+        'GET',
+        `/instances/${instanceName}/webhooks/deliveries?limit=${Math.max(1, Math.min(limit, 200))}&outcome=${encodeURIComponent(outcome)}`
       )
     },
     diagnose: (cfg: GatewayConfig, instanceName: string, webhookId: string) => {

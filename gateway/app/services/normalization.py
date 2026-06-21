@@ -5,6 +5,7 @@ import hashlib
 import time
 import uuid
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -199,6 +200,28 @@ def _to_int64(value: Any) -> int | None:
     return None
 
 
+def _iso_to_unix_ms(value: Any) -> int | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp() * 1000)
+
+
+def _unix_to_ms(value: Any) -> int | None:
+    raw = _to_int64(value)
+    if raw is None or raw <= 0:
+        return None
+    return raw * 1000 if raw < 10**12 else raw
+
+
 def _stable_media_id(*, media_key_name: str, raw: dict[str, Any], kind: str) -> str:
     identity = {
         "mediaKeyName": media_key_name,
@@ -223,6 +246,48 @@ def _as_dict_items(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
     return []
+
+
+def _extract_source_timestamp_ms(payload: dict[str, Any]) -> int | None:
+    data = payload.get("data")
+    candidates = [
+        _first(payload, ("data", "messageTimestamp")),
+        _first(payload, ("data", "message", "messageTimestamp")),
+        _first(payload, ("data", "timestamp")),
+        _first(payload, ("data", "message", "timestamp")),
+    ]
+
+    for item in _as_dict_items(data):
+        candidates.extend(
+            [
+                _first(item, ("messageTimestamp",)),
+                _first(item, ("timestamp",)),
+                _first(item, ("message", "messageTimestamp")),
+                _first(item, ("message", "timestamp")),
+                _first(item, ("update", "messageTimestamp")),
+                _first(item, ("update", "timestamp")),
+                _first(item, ("messageUpdate", "messageTimestamp")),
+                _first(item, ("messageUpdate", "timestamp")),
+            ]
+        )
+
+    candidates.extend(
+        [
+            payload.get("date_time"),
+            payload.get("dateTime"),
+            _first(payload, ("data", "date_time")),
+            _first(payload, ("data", "dateTime")),
+        ]
+    )
+
+    for candidate in candidates:
+        numeric_ms = _unix_to_ms(candidate)
+        if numeric_ms is not None:
+            return numeric_ms
+        iso_ms = _iso_to_unix_ms(candidate)
+        if iso_ms is not None:
+            return iso_ms
+    return None
 
 
 def _normalize_message_update(payload: dict[str, Any], base: dict[str, Any]) -> dict[str, Any]:
@@ -708,6 +773,7 @@ def normalize_webhook(payload: dict[str, Any]) -> dict[str, Any]:
     source_event = str(payload.get("event", "UNKNOWN"))
     event = _canonical_event_name(source_event)
     now_ms = int(time.time() * 1000)
+    source_timestamp_ms = _extract_source_timestamp_ms(payload)
 
     base = {
         "id": str(uuid.uuid4())[:16],
@@ -715,6 +781,7 @@ def normalize_webhook(payload: dict[str, Any]) -> dict[str, Any]:
         "sourceEvent": source_event,
         "instance": payload.get("instance"),
         "timestamp": now_ms,
+        "sourceTimestamp": source_timestamp_ms,
     }
 
     if event in TECHNICAL_EVENTS:
