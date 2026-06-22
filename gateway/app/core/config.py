@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     bot_webhook_backoff_base_ms: int = 400
     bot_webhook_max_parallel: int = 20
     bot_webhook_max_queue: int = 200
+    enable_group_messages: bool = False
 
     dedupe_ttl_seconds: int = 180
     dedupe_max_items: int = 20000

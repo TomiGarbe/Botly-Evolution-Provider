@@ -6,6 +6,7 @@ from typing import Any
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.services.group_messages import group_message_audit_context, is_group_message
 from app.services.normalization import normalize_webhook, save_event, save_pipeline_event, save_raw_event
 from app.services.reliability import conversation_id, inbound_dedupe, is_flood, looks_like_outbound_echo, message_fingerprint
 
@@ -116,6 +117,37 @@ def process_incoming_webhook(payload: dict[str, Any], request_id: str) -> dict[s
         _inc("normalization_fallback_total")
     if bool((normalized.get("metadata") or {}).get("unknownTypeDetected")):
         _unknown_type_counters[str(normalized.get("originalType") or "unknown")] += 1
+
+    if not settings.enable_group_messages and (is_group_message(payload) or is_group_message(normalized)):
+        message = normalized.get("message") or {}
+        msg_id = str(message.get("id") or "")
+        group_context = {
+            **group_message_audit_context(payload),
+            **{k: v for k, v in group_message_audit_context(normalized).items() if v is not None},
+        }
+        group_id = group_context.get("groupId")
+        sender = group_context.get("sender")
+        logger.info(
+            "Group message ignored",
+            request_id=request_id,
+            instance=instance,
+            group_id=group_id,
+            sender=sender,
+            message_id=msg_id or None,
+            reason="group_messages_disabled",
+        )
+        trace["route"] = {"status": "ignored", "reason": "group_messages_disabled", "groupId": group_id}
+        _inc("group_messages_ignored_total")
+        save_pipeline_event(
+            stage="route",
+            status="ignored_group",
+            instance=instance,
+            message_id=msg_id or None,
+            request_id=request_id,
+            event=str(normalized.get("event") or payload.get("event") or "UNKNOWN"),
+            details=group_context,
+        )
+        return {"status": "ignored_group", "normalized": normalized, "trace": trace, "classification": classification}
 
     if normalized.get("layer") == "technical":
         logger.info("[MESSAGE][FILTERED] technical event ignored", request_id=request_id, instance=instance, reason=normalized.get("reason"))
