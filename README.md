@@ -96,6 +96,25 @@ Se normalizan quitando slash final para evitar rutas inconsistentes.
 Se agrega `PUBLIC_BASE_URL` en `config/.env` y en Docker Compose para dejar explicita la URL publica real del gateway.
 Esta variable es de configuracion operativa para evitar usar `localhost` o hosts internos en integraciones.
 
+### CORS del gateway
+
+La configuracion CORS vive en el gateway FastAPI y se pasa al contenedor desde `docker/docker-compose.yml`.
+En produccion `CORS_ALLOWED_ORIGINS` debe incluir `https://panel-evolution.botly.com.ar` sin slash final.
+
+Variables:
+- `CORS_ALLOWED_ORIGINS`: lista separada por coma de origins permitidos.
+- `CORS_ALLOW_ORIGIN_REGEX`: regex opcional para desarrollo local.
+- `CORS_DEBUG`: activar temporalmente para loguear Origin, metodo, decision CORS y headers enviados.
+
+Prueba rapida:
+
+```bash
+curl -i -X OPTIONS "https://evolution.botly.com.ar/instances/" \
+  -H "Origin: https://panel-evolution.botly.com.ar" \
+  -H "Access-Control-Request-Method: GET" \
+  -H "Access-Control-Request-Headers: x-api-key,content-type"
+```
+
 ### Uso desde bots externos
 
 Para enviar mensajes desde un bot externo:

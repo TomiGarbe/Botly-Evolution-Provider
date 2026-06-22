@@ -12,6 +12,7 @@ from slowapi.util import get_remote_address
 from app.core.config import get_settings
 from app.core.logging import setup_logging, get_logger
 from app.middleware.auth import AuthMiddleware
+from app.middleware.cors_diagnostics import CorsDiagnosticsMiddleware
 from app.middleware.logging import RequestLoggingMiddleware
 from app.routers import instances, messages, webhooks, media, instance_webhooks
 from app.services import evolution
@@ -53,6 +54,12 @@ async def _startup_recovery() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("gateway_starting", port=settings.gateway_port, debug=settings.debug)
+    logger.info(
+        "cors_config_loaded",
+        allowed_origins=settings.cors_allowed_origins_list,
+        allow_origin_regex=settings.cors_allow_origin_regex,
+        debug=settings.cors_debug,
+    )
     logger.info("[BOOT][DB] evolution connectivity setup", evolution_url=settings.evolution_url)
     logger.info(
         "[BOOT][VOLUMES] gateway persistence paths",
@@ -74,7 +81,7 @@ async def lifespan(app: FastAPI):
     logger.info("gateway_stopped")
 
 
-app = FastAPI(
+api = FastAPI(
     title="Botly Evolution Gateway",
     version="1.0.0",
     docs_url="/docs",
@@ -82,36 +89,26 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+api.state.limiter = limiter
+api.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-app.add_middleware(RequestLoggingMiddleware)
-app.add_middleware(AuthMiddleware)
-app.add_middleware(SlowAPIMiddleware)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-    ],
-    allow_origin_regex=r"^https?://localhost(:\d+)?$",
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+api.add_middleware(RequestLoggingMiddleware)
+api.add_middleware(AuthMiddleware)
+api.add_middleware(SlowAPIMiddleware)
 
-app.include_router(instances.router)
-app.include_router(messages.router)
-app.include_router(webhooks.router)
-app.include_router(media.router)
-app.include_router(instance_webhooks.router)
+api.include_router(instances.router)
+api.include_router(messages.router)
+api.include_router(webhooks.router)
+api.include_router(media.router)
+api.include_router(instance_webhooks.router)
 
 
-@app.get("/health", tags=["system"])
+@api.get("/health", tags=["system"])
 async def health():
     return {"status": "ok", "service": "evolution-gateway"}
 
 
-@app.get("/ready", tags=["system"])
+@api.get("/ready", tags=["system"])
 async def ready():
     try:
         data = await evolution.fetch_instances()
@@ -125,7 +122,7 @@ async def ready():
         )
 
 
-@app.exception_handler(Exception)
+@api.exception_handler(Exception)
 async def unhandled_exception_handler(request, exc):
     logger.error(
         "unhandled_exception",
@@ -134,3 +131,14 @@ async def unhandled_exception_handler(request, exc):
         exc_info=settings.debug,
     )
     return JSONResponse(status_code=500, content={"detail": "Error interno del servidor"})
+
+
+app = CORSMiddleware(
+    api,
+    allow_origins=settings.cors_allowed_origins_list,
+    allow_origin_regex=settings.cors_allow_origin_regex or None,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+    max_age=600,
+)
+app = CorsDiagnosticsMiddleware(app)
