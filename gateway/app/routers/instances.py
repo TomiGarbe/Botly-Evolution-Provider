@@ -7,15 +7,8 @@ from fastapi import APIRouter, HTTPException, Query, Request, status
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.models.requests import CreateInstanceRequest
-from app.services import evolution
+from app.services import evolution, instance_auth
 from app.services.evolution import EvolutionError
-from app.services.instance_auth import (
-    create_or_regenerate_instance_key,
-    delete_instance_key_record,
-    ensure_instance_key,
-    get_instance_key_info,
-    revoke_instance_key,
-)
 from app.services.instance_webhooks import delete_all_instance_webhooks
 from app.services.instances_contract import normalize_instance, normalize_instance_list, normalize_instance_status
 
@@ -83,7 +76,7 @@ async def create_instance(body: CreateInstanceRequest):
 
     if body.auto_configure_webhook:
         await _configure_webhook_if_needed(instance_name)
-    ensure_instance_key(instance_name, instance_id=instance_name)
+    instance_auth.ensure_instance_key(instance_name, instance_id=instance_name)
 
     if isinstance(result, dict):
         normalized = normalize_instance(result)
@@ -104,7 +97,7 @@ async def list_instances():
     normalized = normalize_instance_list(instances)
     for item in normalized:
         _last_known_state[item["name"]] = item["status"]
-        ensure_instance_key(item["name"], instance_id=item.get("id"))
+        instance_auth.ensure_instance_key(item["name"], instance_id=item.get("id"))
     return normalized
 
 
@@ -207,7 +200,7 @@ async def delete(instance_name: str):
         result = await evolution.delete_instance(instance_name)
         _last_known_state.pop(instance_name, None)
         _last_qr_at.pop(instance_name, None)
-        delete_instance_key_record(instance_name)
+        instance_auth.delete_instance_key_record(instance_name)
         delete_all_instance_webhooks(instance_name)
         return {"ok": True, "instance": {"id": instance_name, "name": instance_name, "status": "close"}, "raw": result}
     except EvolutionError as exc:
@@ -215,7 +208,7 @@ async def delete(instance_name: str):
             logger.warning("delete_idempotent_fallback", instance=instance_name, error=str(exc))
             _last_known_state.pop(instance_name, None)
             _last_qr_at.pop(instance_name, None)
-            delete_instance_key_record(instance_name)
+            instance_auth.delete_instance_key_record(instance_name)
             delete_all_instance_webhooks(instance_name)
             return {"ok": True, "instance": {"id": instance_name, "name": instance_name, "status": "close"}, "stale": True}
         raise _apply_http_error(exc)
@@ -231,8 +224,8 @@ async def get_instance_api_key(instance_name: str, request: Request, reveal: boo
         raise HTTPException(status_code=403, detail="Token no autorizado para esta instancia")
     if reveal:
         raise HTTPException(status_code=403, detail="No se permite revelar API keys completas")
-    ensure_instance_key(instance_name, instance_id=instance_name)
-    return get_instance_key_info(instance_name, reveal=False)
+    instance_auth.ensure_instance_key(instance_name, instance_id=instance_name)
+    return instance_auth.get_instance_key_info(instance_name, reveal=False)
 
 
 @router.post("/{instance_name}/api-key/regenerate")
@@ -240,7 +233,7 @@ async def regenerate_instance_api_key(instance_name: str, request: Request):
     instance_name = _validate_instance_name(instance_name)
     if not bool(getattr(request.state, "is_admin", False)):
         raise HTTPException(status_code=403, detail="Solo admin puede regenerar API key")
-    return create_or_regenerate_instance_key(instance_name, instance_id=instance_name)
+    return instance_auth.create_or_regenerate_instance_key(instance_name, instance_id=instance_name)
 
 
 @router.delete("/{instance_name}/api-key")
@@ -248,7 +241,7 @@ async def revoke_api_key(instance_name: str, request: Request):
     instance_name = _validate_instance_name(instance_name)
     if not bool(getattr(request.state, "is_admin", False)):
         raise HTTPException(status_code=403, detail="Solo admin puede revocar API key")
-    return revoke_instance_key(instance_name)
+    return instance_auth.revoke_instance_key(instance_name)
 
 
 @router.post("/{instance_name}/api-key/enable")
@@ -256,4 +249,4 @@ async def enable_api_key(instance_name: str, request: Request):
     instance_name = _validate_instance_name(instance_name)
     if not bool(getattr(request.state, "is_admin", False)):
         raise HTTPException(status_code=403, detail="Solo admin puede habilitar API key")
-    return create_or_regenerate_instance_key(instance_name, instance_id=instance_name)
+    return instance_auth.create_or_regenerate_instance_key(instance_name, instance_id=instance_name)
