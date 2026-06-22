@@ -125,6 +125,7 @@ services:
       EVOLUTION_URL: http://evolution:8080
       EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
       BOT_WEBHOOK_URL: ${BOT_WEBHOOK_URL:-}
+      ENABLE_GROUP_MESSAGES: ${ENABLE_GROUP_MESSAGES:-false}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       INSTANCE_API_KEYS_PATH: /var/lib/botly/instance_api_keys.json
       INSTANCE_WEBHOOKS_PATH: /var/lib/botly/instance_webhooks.json

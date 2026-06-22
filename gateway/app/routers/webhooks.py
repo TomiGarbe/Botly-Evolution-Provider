@@ -371,6 +371,8 @@ async def receive_webhook(request: Request):
         return {"status": "normalize_error"}
     if pipeline_result.get("status") == "stale_dropped":
         return {"status": "stale_dropped"}
+    if pipeline_result.get("status") == "ignored_group":
+        return {"status": "ignored_group"}
     if pipeline_result.get("status") in {"duplicate", "duplicate_fp", "echo_filtered", "throttled"}:
         return {"status": pipeline_result.get("status")}
 
