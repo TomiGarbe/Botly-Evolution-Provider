@@ -434,14 +434,21 @@ async def receive_webhook(request: Request):
     if bool((normalized.get("message") or {}).get("fromMe")):
         save_pipeline_event(
             stage="anti_loop",
-            status="skipped_from_me",
+            status="forwarding_from_me",
             instance=instance,
             message_id=msg_id,
             conversation_id=conv_id,
             request_id=request_id,
         )
-        logger.debug("loop_prevented_from_me", request_id=request_id, instance=instance, message_id=msg_id)
-        return {"status": "from_me_saved"}
+        logger.info(
+            "from_me_forwarded_to_bot",
+            request_id=request_id,
+            instance=instance,
+            message_id=msg_id or None,
+            conversation_id=conv_id or None,
+            direction=normalized.get("direction"),
+            subtype=normalized.get("subtype"),
+        )
 
     if len(_forward_tasks) >= settings.bot_webhook_max_queue:
         save_pipeline_event(
