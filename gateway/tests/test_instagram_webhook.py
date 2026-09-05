@@ -150,6 +150,7 @@ def test_instagram_resolution_rejects_unknown_or_disconnected_connection(monkeyp
 def test_meta_webhook_instagram_uses_raw_body_signature_and_acknowledges(monkeypatch, tmp_path) -> None:
     service, connection = _bound_service(monkeypatch, tmp_path)
     persisted: list[dict] = []
+    timeline_events: list[dict] = []
 
     class _Dispatcher:
         def persist_many(self, events):
@@ -159,6 +160,7 @@ def test_meta_webhook_instagram_uses_raw_body_signature_and_acknowledges(monkeyp
     monkeypatch.setattr(meta_webhook, "get_settings", _settings)
     monkeypatch.setattr(instagram_webhook_module, "get_connection_service", lambda: service)
     monkeypatch.setattr(meta_webhook, "get_core_inbound_dispatcher", lambda: _Dispatcher())
+    monkeypatch.setattr(meta_webhook, "save_event", lambda event: timeline_events.append(event) or True)
     payload = _payload({"sender": {"id": "instagram_user_abc"}, "recipient": {"id": "178400012345678"}, "message": {"mid": "mid-1", "text": "hola"}})
     body, signature = _signed(payload)
 
@@ -167,6 +169,12 @@ def test_meta_webhook_instagram_uses_raw_body_signature_and_acknowledges(monkeyp
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "object": "instagram", "canonicalEvents": 1, "acknowledged": 1}
     assert len(persisted) == 1 and persisted[0]["trace"]["correlationId"]
+    assert timeline_events[0]["instance"] == connection.id
+    assert timeline_events[0]["sender"] == "instagram_user_abc"
+    assert timeline_events[0]["message"]["id"] == "mid-1"
+    assert timeline_events[0]["providerDelivery"]["channelId"] == "instagram"
+    assert "remoteJid" not in json.dumps(timeline_events[0])
+    assert "credential-token" not in json.dumps(timeline_events[0])
 
     modified = body.replace(b"hola", b"chau")
     assert client.post("/webhooks/meta", content=modified, headers={"X-Hub-Signature-256": signature}).status_code == 401

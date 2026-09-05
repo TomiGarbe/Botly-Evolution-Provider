@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import datetime
 import uuid
 from typing import Any
 
@@ -25,10 +26,56 @@ from app.services.credential_manager import get_credential_manager
 from app.services.event_pipeline import process_incoming_webhook
 from app.services.core_inbound_dispatcher import CoreInboundPersistenceError, get_core_inbound_dispatcher
 from app.services.instagram_webhook import InstagramWebhookError, process_instagram_webhook
-from app.services.normalization import save_pipeline_event
+from app.services.normalization import save_event, save_pipeline_event
 
 router = APIRouter(prefix="/webhooks", tags=["meta-webhook"])
 logger = get_logger(__name__)
+
+
+def _instagram_timeline_event(canonical: dict[str, object]) -> dict[str, object] | None:
+    """Project a canonical Instagram message into Gateway observability.
+
+    This is deliberately a second, local projection: Core handoff remains
+    owned by the durable dispatcher below.  Only the canonical, already
+    sanitized fields are copied, so a provider body, token, or phone/JID never
+    becomes part of the connection message timeline.
+    """
+    if canonical.get("eventType") != "message.created":
+        return None
+    transport = canonical.get("transport") if isinstance(canonical.get("transport"), dict) else {}
+    message = canonical.get("message") if isinstance(canonical.get("message"), dict) else {}
+    trace = canonical.get("trace") if isinstance(canonical.get("trace"), dict) else {}
+    connection_id = str(transport.get("connectionRef") or "").strip()
+    if not connection_id:
+        return None
+    sender = message.get("sender") if isinstance(message.get("sender"), dict) else {}
+    recipient = message.get("recipient") if isinstance(message.get("recipient"), dict) else {}
+    attachments = message.get("attachments") if isinstance(message.get("attachments"), list) else []
+    attachment = next((item for item in attachments if isinstance(item, dict)), None)
+    provider_message_id = str(message.get("providerMessageId") or "").strip() or None
+    occurred_at = str(canonical.get("occurredAt") or "")
+    try:
+        timestamp = int(datetime.fromisoformat(occurred_at.replace("Z", "+00:00")).timestamp() * 1000)
+    except (TypeError, ValueError):
+        timestamp = int(time.time() * 1000)
+    media = None
+    if attachment:
+        media = {
+            "id": attachment.get("providerMediaId"), "kind": attachment.get("kind"),
+            "mimeType": attachment.get("mimeType"), "fileName": attachment.get("fileName"),
+        }
+    return {
+        "id": str(canonical.get("eventId") or ""), "event": "INSTAGRAM_INBOUND_MESSAGE", "layer": "business",
+        "instance": connection_id, "timestamp": timestamp, "type": "message", "subtype": message.get("kind") or "text",
+        "messageType": message.get("kind") or "text", "direction": "inbound", "status": "received",
+        "text": message.get("content") or "", "content": {"text": message.get("content") or ""},
+        "sender": sender.get("externalId"), "recipient": recipient.get("externalId"),
+        "message": {"id": provider_message_id, "from": sender.get("externalId"), "kind": message.get("kind") or "text", "text": message.get("content") or ""},
+        "media": media, "provider": "meta",
+        "providerDelivery": {"provider": "meta", "providerMessageId": provider_message_id, "connectionId": connection_id, "channelId": "instagram", "eventId": canonical.get("eventId"), "requestId": trace.get("requestId"), "correlationId": trace.get("correlationId")},
+        "meta": {"connectionId": connection_id, "channelId": "instagram", "providerAccountId": transport.get("providerAccountRef"), "requestId": trace.get("requestId")},
+        "correlationId": trace.get("correlationId"),
+    }
 
 
 def _trace(
@@ -408,6 +455,10 @@ async def receive_meta_webhook(request: Request) -> dict[str, Any]:
                 error=str(exc),
             )
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Instagram event handoff persistence failed") from exc
+        for event in canonical:
+            timeline_event = _instagram_timeline_event(event)
+            if timeline_event is not None:
+                save_event(timeline_event)
         messaging_count = sum(
             len(entry.get("messaging") or [])
             for entry in payload.get("entry") or []

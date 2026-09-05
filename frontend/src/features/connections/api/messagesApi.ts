@@ -32,6 +32,17 @@ export async function listTimelineMessages(runtimeName: string): Promise<Timelin
   return payload.items
 }
 
+export async function listInstagramTimelineMessages(connectionId: string): Promise<TimelineMessage[]> {
+  const payload = await gatewayRequest<{ items: TimelineMessage[] }>(`/connections/${encodeURIComponent(connectionId)}/instagram/messages?limit=200`)
+  return payload.items
+}
+
+export async function sendInstagramWorkspaceMessage(connectionId: string, externalId: string, text: string): Promise<void> {
+  await gatewayRequest(`/connections/${encodeURIComponent(connectionId)}/instagram/messages`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ external_id: externalId, text }),
+  })
+}
+
 export function sendWorkspaceMessage(
   runtimeName: string,
   input: { number: string; type: MessageKind; text?: string; caption?: string; file?: File },

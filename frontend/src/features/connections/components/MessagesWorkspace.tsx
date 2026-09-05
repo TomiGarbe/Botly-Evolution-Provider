@@ -1,7 +1,7 @@
 import { ArrowDownLeft, ArrowUpRight, Check, CheckCheck, FileText, Image, MessageCircle, Mic, RefreshCw, Search, Send, SlidersHorizontal, Video, X } from 'lucide-react'
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import type { MessageKind, TimelineMessage } from '../api/messagesApi'
-import { listTimelineMessages, sendWorkspaceMessage } from '../api/messagesApi'
+import { listInstagramTimelineMessages, listTimelineMessages, sendInstagramWorkspaceMessage, sendWorkspaceMessage } from '../api/messagesApi'
 import { SafeJsonViewer } from '@/features/observability/components/SafeJsonViewer'
 import { EmptyState } from '@/shared/components/EmptyState'
 import { LoadingState } from '@/shared/components/LoadingState'
@@ -106,7 +106,7 @@ function IdentifierList({ message }: { message: TimelineMessage }) {
   return <section className="workspace-message-detail-section"><h4>Identificadores</h4><dl className="workspace-message-identifiers">{identifiers.map(([label, value]) => <div key={label}><dt>{label}</dt><dd><code>{value}</code></dd></div>)}</dl></section>
 }
 
-export function MessagesWorkspace({ runtimeName, messageId }: { runtimeName: string | null; connectionId?: string; messageId?: string | null }) {
+export function MessagesWorkspace({ runtimeName, connectionId, messageId, instagram = false }: { runtimeName: string | null; connectionId?: string; messageId?: string | null; instagram?: boolean }) {
   const [messages, setMessages] = useState<TimelineMessage[]>([])
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null)
   const [search, setSearch] = useState('')
@@ -124,17 +124,17 @@ export function MessagesWorkspace({ runtimeName, messageId }: { runtimeName: str
   const [file, setFile] = useState<File | null>(null)
   const [caption, setCaption] = useState('')
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
-  const [isLoading, setIsLoading] = useState(Boolean(runtimeName))
+  const [isLoading, setIsLoading] = useState(Boolean(runtimeName || (instagram && connectionId)))
   const [isSending, setIsSending] = useState(false)
   const [progress, setProgress] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
   const load = useCallback(async (quiet = false) => {
-    if (!runtimeName) return
+    if (!runtimeName && !(instagram && connectionId)) return
     if (!quiet) setIsLoading(true)
     try {
-      const next = await listTimelineMessages(runtimeName)
+      const next = instagram && connectionId ? await listInstagramTimelineMessages(connectionId) : await listTimelineMessages(runtimeName as string)
       setMessages(next)
       setSelectedMessageId((current) => current && next.some((message) => message.id === current) ? current : (messageId ? next.find((message) => message.messageId === messageId)?.id || null : null))
     } catch {
@@ -142,14 +142,14 @@ export function MessagesWorkspace({ runtimeName, messageId }: { runtimeName: str
     } finally {
       if (!quiet) setIsLoading(false)
     }
-  }, [messageId, runtimeName])
+  }, [connectionId, instagram, messageId, runtimeName])
 
   useEffect(() => { void load() }, [load])
   useEffect(() => {
-    if (!runtimeName) return
+    if (!runtimeName && !(instagram && connectionId)) return
     const interval = window.setInterval(() => { void load(true) }, 5000)
     return () => window.clearInterval(interval)
-  }, [load, runtimeName])
+  }, [connectionId, instagram, load, runtimeName])
   useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl) }, [previewUrl])
 
   const availableStatuses = useMemo(() => [...new Set(messages.map((message) => message.status).filter((value): value is string => Boolean(value)))].sort(), [messages])
@@ -214,14 +214,15 @@ export function MessagesWorkspace({ runtimeName, messageId }: { runtimeName: str
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!runtimeName) return
-    const target = phone(number)
-    if (target.length < 8) return setError('Ingresá un número de WhatsApp válido, con código de país.')
+    if (!runtimeName && !(instagram && connectionId)) return
+    const target = instagram ? number.trim() : phone(number)
+    if (instagram ? !target : target.length < 8) return setError(instagram ? 'Ingresá el External ID de Instagram.' : 'Ingresá un número de WhatsApp válido, con código de país.')
     if (!attachmentType && !text.trim()) return setError('Escribí un mensaje antes de enviarlo.')
-    if (attachmentType && !file) return setError('Seleccioná el archivo que querés enviar.')
+    if (!instagram && attachmentType && !file) return setError('Seleccioná el archivo que querés enviar.')
     setError(null); setNotice(null); setIsSending(true); setProgress(0)
     try {
-      await sendWorkspaceMessage(runtimeName, attachmentType ? { number: target, type: attachmentType, file: file || undefined, caption } : { number: target, type: 'text', text: text.trim() }, setProgress)
+      if (instagram && connectionId) await sendInstagramWorkspaceMessage(connectionId, target, text.trim())
+      else await sendWorkspaceMessage(runtimeName as string, attachmentType ? { number: target, type: attachmentType, file: file || undefined, caption } : { number: target, type: 'text', text: text.trim() }, setProgress)
       setText(''); clearAttachment(); setNotice('Mensaje enviado.'); await load(true)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'No se pudo enviar el mensaje.')
@@ -230,7 +231,7 @@ export function MessagesWorkspace({ runtimeName, messageId }: { runtimeName: str
     }
   }
 
-  if (!runtimeName) return <section className="connection-section"><h3>Mensajes</h3><p className="connection-section-value">La conexión todavía no está lista para mensajería.</p></section>
+  if (!runtimeName && !(instagram && connectionId)) return <section className="connection-section"><h3>Mensajes</h3><p className="connection-section-value">La conexión todavía no está lista para mensajería.</p></section>
 
   return <section className="connection-section workspace-messages">
     <div className="connection-section-heading"><div><h3>Mensajes</h3><p>Un mensaje lógico por envío o recepción; el detalle conserva su evidencia técnica.</p></div><div className="connection-inline-actions workspace-message-actions"><button type="button" className="client-button-secondary" onClick={() => void load()} disabled={isLoading}><RefreshCw size={15} aria-hidden="true" /> Actualizar</button></div></div>
@@ -255,9 +256,9 @@ export function MessagesWorkspace({ runtimeName, messageId }: { runtimeName: str
       </section>
     </div>
     <form className="workspace-composer" onSubmit={submit}>
-      <label><span>Número de destino</span><Input inputMode="numeric" value={number} onChange={(event) => setNumber(event.target.value)} placeholder="549…" disabled={isSending} required /></label>
+      <label><span>{instagram ? 'Recipient External ID' : 'Número de destino'}</span><Input inputMode={instagram ? 'text' : 'numeric'} value={number} onChange={(event) => setNumber(event.target.value)} placeholder={instagram ? 'Instagram scoped user ID' : '549…'} disabled={isSending} required /></label>
       {attachmentType ? <div className="workspace-attachment"><div className="workspace-attachment-heading"><span>{types.find((type) => type.value === attachmentType)?.label}</span><button type="button" onClick={clearAttachment} disabled={isSending} aria-label="Quitar archivo"><X size={16} /></button></div><input type="file" accept={types.find((type) => type.value === attachmentType)?.accept} onChange={(event) => chooseFile(event.target.files?.[0] || null)} disabled={isSending} />{file ? <p>{file.name} · {Math.ceil(file.size / 1024)} KB</p> : null}{previewUrl && attachmentType === 'image' ? <img src={previewUrl} alt="Vista previa del archivo" /> : null}{previewUrl && attachmentType === 'audio' ? <audio controls src={previewUrl} /> : null}{previewUrl && attachmentType === 'video' ? <video controls src={previewUrl} /> : null}<Input value={caption} onChange={(event) => setCaption(event.target.value)} placeholder="Descripción opcional" maxLength={4096} disabled={isSending} /></div> : <label><span>Mensaje</span><Textarea value={text} onChange={(event) => setText(event.target.value)} rows={3} maxLength={4096} placeholder="Escribí un mensaje…" disabled={isSending} /></label>}
-      <div className="workspace-composer-actions"><div className="workspace-file-types"><span>Adjuntar</span>{types.map((type) => <button key={type.value} type="button" onClick={() => { setAttachmentType(type.value); setText('') }} disabled={isSending} title={type.label}>{typeIcon(type.value)}<span>{type.label}</span></button>)}</div><button className="client-button-primary" type="submit" disabled={isSending}><Send size={15} aria-hidden="true" /> {isSending ? 'Enviando…' : 'Enviar'}</button></div>
+      <div className="workspace-composer-actions">{!instagram ? <div className="workspace-file-types"><span>Adjuntar</span>{types.map((type) => <button key={type.value} type="button" onClick={() => { setAttachmentType(type.value); setText('') }} disabled={isSending} title={type.label}>{typeIcon(type.value)}<span>{type.label}</span></button>)}</div> : <span className="connection-endpoint-note">Instagram usa identificadores externos opacos, nunca teléfonos.</span>}<button className="client-button-primary" type="submit" disabled={isSending}><Send size={15} aria-hidden="true" /> {isSending ? 'Enviando…' : 'Enviar'}</button></div>
       {isSending && attachmentType ? <div className="workspace-progress"><span style={{ width: `${progress}%` }} /><small>Subiendo archivo: {progress}%</small></div> : null}
     </form>
   </section>
