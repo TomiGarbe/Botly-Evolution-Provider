@@ -45,9 +45,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # Instance API keys are the credentials Botly stores per Evolution
         # channel.  They intentionally have a narrower scope than the global
-        # Gateway key: only the unified message endpoint accepts them.
+        # Gateway key: only the legacy unified endpoint and the versioned
+        # canonical outbound endpoint accept them.
         instance_auth = authenticate_instance_token(provided_key)
-        if instance_auth and request.url.path.startswith("/messages/"):
+        if instance_auth and (
+            request.url.path.startswith("/messages/")
+            or request.url.path == "/v1/outbound/messages"
+        ):
             request.state.auth_method = "instance_api_key"
             request.state.auth_instance = instance_auth["instance"]
             return await self._next(call_next, request)
