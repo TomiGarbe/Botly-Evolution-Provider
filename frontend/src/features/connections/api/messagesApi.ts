@@ -32,6 +32,18 @@ export async function listTimelineMessages(runtimeName: string): Promise<Timelin
   return payload.items
 }
 
+/** Provider routing belongs to the Gateway, so the workspace stays uniform. */
+export async function listConnectionTimelineMessages(connectionId: string): Promise<TimelineMessage[]> {
+  const payload = await gatewayRequest<{ items: TimelineMessage[] }>(`/connections/${encodeURIComponent(connectionId)}/messages?limit=200`)
+  return payload.items
+}
+
+export async function sendConnectionText(connectionId: string, recipient: string, text: string): Promise<void> {
+  await gatewayRequest(`/connections/${encodeURIComponent(connectionId)}/messages`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recipient, text }),
+  })
+}
+
 export async function listInstagramTimelineMessages(connectionId: string): Promise<TimelineMessage[]> {
   const payload = await gatewayRequest<{ items: TimelineMessage[] }>(`/connections/${encodeURIComponent(connectionId)}/instagram/messages?limit=200`)
   return payload.items

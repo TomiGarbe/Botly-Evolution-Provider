@@ -129,13 +129,13 @@ class ConnectionOperationsService:
         }
 
     def integration_endpoints(self, connection_id: str) -> dict[str, str]:
-        runtime_name = self._runtime_name(connection_id)
+        self._runtime_name(connection_id)
         settings = get_settings()
         base_url = str(settings.public_app_url or "").strip().rstrip("/")
         if not base_url:
             base_url = f"http://127.0.0.1:{settings.gateway_port}"
         return {
-            "message_api_url": f"{base_url}/messages/{runtime_name}",
+            "message_api_url": f"{base_url}/connections/{connection_id}/messages",
             "meta_webhook_url": f"{base_url}/webhooks/meta",
         }
 

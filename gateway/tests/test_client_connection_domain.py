@@ -301,6 +301,67 @@ def test_connections_router_exposes_client_bound_crud_contract(monkeypatch, tmp_
     assert http.get(f"/connections?client_id={owner.id}").json() == []
 
 
+def test_connection_messages_use_the_connection_address_for_timeline_and_send(monkeypatch, tmp_path) -> None:
+    registry = ConnectionRegistry(tmp_path / "connection_registry.json")
+    owner = ClientService(registry).create_client("Global Tech")
+    service = ConnectionService(_EmptyRuntime(), registry)
+    connection = service.create_connection(client_id=owner.id, channel="whatsapp")
+    sent: dict[str, str] = {}
+
+    class Operations:
+        async def send_quick_message(self, connection_id: str, *, number: str, text: str) -> dict[str, str]:
+            sent.update(connection_id=connection_id, number=number, text=text)
+            return {"ok": "true"}
+
+    monkeypatch.setattr(connections_router, "_service", service)
+    monkeypatch.setattr(connections_router, "_operations", Operations())
+    monkeypatch.setattr(connections_router, "list_logical_messages", lambda instance, limit: [{"instance": instance, "limit": limit}])
+    api = FastAPI()
+    api.include_router(connections_router.router)
+    http = TestClient(api)
+
+    timeline = http.get(f"/connections/{connection.id}/messages")
+    assert timeline.status_code == 200
+    assert timeline.json()["items"][0]["instance"] == service.connection_runtime_name(connection.id)
+
+    delivered = http.post(f"/connections/{connection.id}/messages", json={"recipient": "5491112345678", "text": "Hola"})
+    assert delivered.status_code == 200
+    assert sent == {"connection_id": connection.id, "number": "5491112345678", "text": "Hola"}
+
+
+def test_connection_messages_route_an_instagram_connection_without_a_frontend_branch(monkeypatch) -> None:
+    sent: dict[str, str] = {}
+
+    class InstagramService:
+        connection = SimpleNamespace(
+            client_id="client-01",
+            channel=SimpleNamespace(id="instagram"),
+            provider=SimpleNamespace(id="meta"),
+        )
+
+        async def get_connection(self, connection_id: str):
+            assert connection_id == "instagram-01"
+            return self.connection
+
+        async def send_instagram_text(self, *, connection_id: str, external_id: str, text: str) -> dict[str, str]:
+            sent.update(connection_id=connection_id, external_id=external_id, text=text)
+            return {"ok": "true"}
+
+    monkeypatch.setattr(connections_router, "_service", InstagramService())
+    monkeypatch.setattr(connections_router, "list_logical_messages", lambda instance, limit: [{"instance": instance, "limit": limit}])
+    api = FastAPI()
+    api.include_router(connections_router.router)
+    http = TestClient(api)
+
+    timeline = http.get("/connections/instagram-01/messages")
+    assert timeline.status_code == 200
+    assert timeline.json()["items"][0]["instance"] == "instagram-01"
+
+    delivered = http.post("/connections/instagram-01/messages", json={"recipient": "opaque-user-id", "text": "Hola"})
+    assert delivered.status_code == 200
+    assert sent == {"connection_id": "instagram-01", "external_id": "opaque-user-id", "text": "Hola"}
+
+
 def test_empty_runtime_does_not_create_a_migration_client(tmp_path) -> None:
     registry = ConnectionRegistry(tmp_path / "connection_registry.json")
     service = ConnectionService(_EmptyRuntime(), registry)
@@ -388,7 +449,7 @@ def test_connection_operations_record_quick_message_and_heartbeat(tmp_path) -> N
     assert activity[0]["technical"]["Componente"] == "Mensajería"
 
 
-def test_connection_integration_endpoints_include_connection_runtime(monkeypatch, tmp_path) -> None:
+def test_connection_integration_endpoints_are_addressed_by_connection(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         "app.services.connection_operations.get_settings",
         lambda: SimpleNamespace(public_app_url="https://gateway.example.test", gateway_port=9000),
@@ -396,11 +457,9 @@ def test_connection_integration_endpoints_include_connection_runtime(monkeypatch
     registry = ConnectionRegistry(tmp_path / "connection_registry.json")
     client = ClientService(registry).create_client("Global Tech")
     connection = ConnectionService(_EmptyRuntime(), registry).create_connection(client_id=client.id, channel="whatsapp")
-    runtime_name = registry.connection_record_by_id(connection.id)["legacy_name"]
-
     endpoints = ConnectionOperationsService(_EmptyRuntime(), registry).integration_endpoints(connection.id)
 
-    assert endpoints["message_api_url"] == f"https://gateway.example.test/messages/{runtime_name}"
+    assert endpoints["message_api_url"] == f"https://gateway.example.test/connections/{connection.id}/messages"
     assert endpoints["meta_webhook_url"] == "https://gateway.example.test/webhooks/meta"
 
 

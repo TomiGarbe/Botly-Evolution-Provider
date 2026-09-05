@@ -255,6 +255,18 @@ async def list_instagram_messages(connection_id: str, request: Request, limit: i
     return {"items": list_logical_messages(connection_id, limit=limit)}
 
 
+@router.get("/{connection_id}/messages")
+async def list_connection_messages(connection_id: str, request: Request, limit: int = Query(default=200, ge=1, le=500)):
+    """Provider-neutral timeline used by the shared connection workspace."""
+    try:
+        connection = await _service.get_connection(connection_id)
+        require_reviewer_connection_access(request, connection)
+        instance = connection_id if connection.channel.id == "instagram" else _service.connection_runtime_name(connection_id)
+        return {"items": list_logical_messages(instance, limit=limit)}
+    except ConnectionNotFoundError:
+        raise HTTPException(status_code=404, detail="Connection not found")
+
+
 @router.post("/{connection_id}/instagram/messages")
 async def send_instagram_message(connection_id: str, body: InstagramOutboundMessageRequest, request: Request):
     try:
@@ -557,8 +569,11 @@ async def get_connection_diagnostics(connection_id: str):
 @router.post("/{connection_id}/messages")
 async def send_connection_quick_message(connection_id: str, body: ConnectionQuickMessageRequest, request: Request):
     try:
-        require_reviewer_connection_access(request, await _service.get_connection(connection_id))
-        return await _operations.send_quick_message(connection_id, number=body.number, text=body.text)
+        connection = await _service.get_connection(connection_id)
+        require_reviewer_connection_access(request, connection)
+        if connection.channel.id == "instagram" and connection.provider.id == "meta":
+            return await _service.send_instagram_text(connection_id=connection_id, external_id=body.external_id, text=body.text)
+        return await _operations.send_quick_message(connection_id, number=body.external_id, text=body.text)
     except KeyError:
         raise HTTPException(status_code=404, detail="Connection not found")
     except ValueError as exc:

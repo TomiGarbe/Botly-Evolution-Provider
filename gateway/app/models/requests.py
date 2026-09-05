@@ -161,8 +161,22 @@ class ConnectionWebhookRequest(BaseModel):
 class ConnectionQuickMessageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    number: str = Field(..., min_length=5, max_length=40)
+    # ``recipient`` is the provider-neutral UI field. ``number`` remains
+    # accepted for existing WhatsApp clients while the connection service owns
+    # any provider-specific normalization.
+    recipient: str | None = Field(default=None, min_length=1, max_length=512)
+    number: str | None = Field(default=None, min_length=5, max_length=40)
     text: str = Field(..., min_length=1, max_length=4096)
+
+    @model_validator(mode="after")
+    def require_recipient(self) -> "ConnectionQuickMessageRequest":
+        if not (self.recipient or self.number):
+            raise ValueError("recipient is required")
+        return self
+
+    @property
+    def external_id(self) -> str:
+        return str(self.recipient or self.number or "")
 
 
 class InstagramOutboundMessageRequest(BaseModel):
