@@ -138,6 +138,8 @@ def test_instagram_resolution_rejects_unknown_or_disconnected_connection(monkeyp
     with pytest.raises(InstagramWebhookError, match="cannot receive") as exc:
         process_instagram_webhook(unknown, request_id="request", connections=service)
     assert exc.value.status_code == 404
+    assert exc.value.provider_account_id == "unknown-account"
+    assert exc.value.connection_lookup_result == "not_found"
 
     service.disconnect_instagram_connection(connection.id)
     with pytest.raises(InstagramWebhookError, match="cannot receive") as exc:
@@ -186,6 +188,8 @@ def test_instagram_resolution_rejects_invalid_or_ambiguous_persisted_bindings(mo
             connections=service,
         )
     assert wrong_provider.value.status_code == 409
+    assert wrong_provider.value.provider_account_id == "178400012345678"
+    assert wrong_provider.value.connection_lookup_result == "invalid_binding"
     service._registry.update_connection_record(connection.id, {"provider_id": "meta", "channel_id": "whatsapp"})
     with pytest.raises(InstagramWebhookError) as wrong_channel:
         process_instagram_webhook(

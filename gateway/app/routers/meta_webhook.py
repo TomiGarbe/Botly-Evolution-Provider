@@ -393,6 +393,8 @@ async def receive_meta_webhook(request: Request) -> dict[str, Any]:
                 channel_type="instagram",
                 status_code=exc.status_code,
                 reason=str(exc),
+                provider_account_id=exc.provider_account_id,
+                connection_lookup_result=exc.connection_lookup_result,
             )
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
         try:

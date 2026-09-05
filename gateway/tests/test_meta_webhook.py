@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.routers import meta_webhook
 from app.services import credential_manager
+from app.services.instagram_webhook import InstagramWebhookError
 
 
 def _settings(
@@ -51,6 +52,45 @@ def test_shared_meta_webhook_requires_the_secret_for_its_object(monkeypatch) -> 
         assert client.post("/webhooks/meta", content=body, headers={"X-Hub-Signature-256": _signature(body, other_secret)}).status_code == 401
         assert client.post("/webhooks/meta", content=body, headers={"X-Hub-Signature-256": "sha256=invalid"}).status_code == 401
         assert client.post("/webhooks/meta", content=body).status_code == 401
+
+
+def test_instagram_resolution_rejection_logs_only_safe_lookup_context(monkeypatch) -> None:
+    class _Logger:
+        def __init__(self):
+            self.warnings = []
+
+        def info(self, *_args, **_kwargs):
+            pass
+
+        def warning(self, _event, **fields):
+            self.warnings.append(fields)
+
+    logger = _Logger()
+    settings = _settings()
+    body = json.dumps({"object": "instagram", "entry": [{"id": "222222", "messaging": []}]}, separators=(",", ":")).encode()
+    monkeypatch.setattr(meta_webhook, "get_settings", lambda: settings)
+    monkeypatch.setattr(meta_webhook, "logger", logger)
+    monkeypatch.setattr(
+        meta_webhook,
+        "process_instagram_webhook",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            InstagramWebhookError(
+                "Instagram connection cannot receive webhooks",
+                status_code=404,
+                provider_account_id="222222",
+                connection_lookup_result="not_found",
+            )
+        ),
+    )
+
+    response = TestClient(app).post("/webhooks/meta", content=body, headers={"X-Hub-Signature-256": _signature(body, settings.instagram_app_secret)})
+
+    assert response.status_code == 404
+    rejection = next(item for item in logger.warnings if item.get("connection_lookup_result") == "not_found")
+    assert rejection["provider"] == "meta"
+    assert rejection["channel_type"] == "instagram"
+    assert rejection["provider_account_id"] == "222222"
+    assert rejection["request_id"]
 
 
 def test_meta_webhook_returns_the_exact_challenge(monkeypatch) -> None:

@@ -140,7 +140,7 @@ def test_token_exchange_and_account_discovery_are_server_side_and_preserve_opaqu
         calls.append(request)
         if request.method == "POST":
             return httpx.Response(200, json={"access_token": "test-token", "expires_in": 3600, "scope": "instagram_business_basic,instagram_business_manage_messages"})
-        return httpx.Response(200, json={"id": "17841400000000000", "username": "botly", "account_type": "BUSINESS"})
+        return httpx.Response(200, json={"id": "111111", "user_id": "17841400000000000", "username": "botly", "account_type": "BUSINESS"})
 
     async def run():
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://instagram.example")
@@ -162,6 +162,45 @@ def test_token_exchange_and_account_discovery_are_server_side_and_preserve_opaqu
     assert b"grant_type=authorization_code" in calls[0].content
     assert b"redirect_uri=https%3A%2F%2Fgateway-server.botly.com.ar%2Fconnections%2Fmeta%2Finstagram%2Fcallback" in calls[0].content
     assert calls[1].headers["authorization"] == "Bearer test-token"
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_provider_account_id"),
+    [
+        ({"id": "111111", "user_id": "222222", "account_type": "BUSINESS"}, "222222"),
+        ({"user_id": "222222", "account_type": "BUSINESS"}, "222222"),
+        ({"id": "111111", "account_type": "BUSINESS"}, "111111"),
+        ({"id": "222222", "user_id": "222222", "account_type": "BUSINESS"}, "222222"),
+    ],
+    ids=("user_id_wins_when_different", "user_id_only", "id_fallback", "matching_ids"),
+)
+def test_discovery_uses_the_webhook_professional_account_id(payload, expected_provider_account_id) -> None:
+    async def run() -> InstagramAccount:
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=payload)),
+            base_url="https://instagram.example",
+        )
+        service = InstagramOAuthService(settings_factory=lambda: _oauth_settings(), client=client)
+        account = await service.discover_account("access-token-must-not-be-logged")
+        await client.aclose()
+        return account
+
+    assert asyncio.run(run()).provider_account_id == expected_provider_account_id
+
+
+def test_discovery_requires_an_instagram_professional_account_id() -> None:
+    async def run() -> None:
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={"account_type": "BUSINESS"})),
+            base_url="https://instagram.example",
+        )
+        service = InstagramOAuthService(settings_factory=lambda: _oauth_settings(), client=client)
+        with pytest.raises(InstagramOAuthError, match="No supported Instagram professional account") as exc:
+            await service.discover_account("access-token-must-not-be-logged")
+        await client.aclose()
+        assert exc.value.status_code == 422
+
+    asyncio.run(run())
 
 
 def test_token_exchange_requires_instagram_secret_not_meta_secret() -> None:
@@ -253,6 +292,41 @@ def test_connection_binding_is_tenant_safe_and_disconnect_removes_credential(mon
     assert disconnected.status.state == "disconnected"
     assert disconnected.provider_account is None
     assert service._credentials.get_provider_credentials(account) is None
+
+
+def test_reauthorization_rebinds_the_webhook_account_and_preserves_the_core_binding(monkeypatch, tmp_path) -> None:
+    service, _, _, connection = _connection_service(monkeypatch, tmp_path)
+    old_account = ProviderAccountReference("meta", "instagram", "111111")
+    refreshed_account = ProviderAccountReference("meta", "instagram", "222222")
+    for account in (old_account, refreshed_account):
+        service._credentials.upsert_provider_credentials(
+            account=account,
+            access_token=f"token-for-{account.provider_account_id}",
+            access_token_ref=f"meta://instagram/{account.provider_account_id}/token",
+            source="test",
+            scopes=("instagram_business_basic", "instagram_business_manage_messages"),
+            expires_at=(datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
+        )
+    service.bind_instagram_provider_account(connection_id=connection.id, account=old_account, metadata={}, required_scopes=())
+    service.bind_instagram_core_channel(
+        connection_id=connection.id,
+        core_channel_id="core-channel-a",
+        dispatch_credential="core-credential-a",
+        core_binding_id="core-binding-a",
+    )
+
+    rebound = service.bind_instagram_provider_account(
+        connection_id=connection.id,
+        account=refreshed_account,
+        metadata={},
+        required_scopes=("instagram_business_basic", "instagram_business_manage_messages"),
+    )
+
+    assert rebound.provider_account == {
+        "provider": "meta", "channelType": "instagram", "providerAccountId": "222222", "metadata": {}
+    }
+    assert rebound.core_channel and rebound.core_channel["channelId"] == "core-channel-a"
+    assert service.instagram_readiness(connection.id, required_scopes=("instagram_business_manage_messages",))["ready"] is True
 
 
 def test_readiness_handles_missing_scopes_and_expired_credentials(monkeypatch, tmp_path) -> None:

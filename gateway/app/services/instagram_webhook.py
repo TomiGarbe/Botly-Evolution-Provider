@@ -8,9 +8,20 @@ from app.services.connections import ConnectionNotFoundError, ConnectionService,
 
 
 class InstagramWebhookError(ValueError):
-    def __init__(self, message: str, *, status_code: int = 422) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int = 422,
+        provider_account_id: str | None = None,
+        connection_lookup_result: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        # These values are safe operational identifiers. They deliberately
+        # exclude the raw payload, sender identity and any credentials.
+        self.provider_account_id = provider_account_id
+        self.connection_lookup_result = connection_lookup_result
 
 
 def process_instagram_webhook(
@@ -58,7 +69,12 @@ def _resolve_connection(service: ConnectionService, provider_account_id: str):
         return service.resolve_active_instagram_provider_account(provider_account_id)
     except (ConnectionNotFoundError, UnsupportedConnectionProviderError) as exc:
         status_code = 404 if isinstance(exc, ConnectionNotFoundError) else 409
-        raise InstagramWebhookError("Instagram connection cannot receive webhooks", status_code=status_code) from exc
+        raise InstagramWebhookError(
+            "Instagram connection cannot receive webhooks",
+            status_code=status_code,
+            provider_account_id=provider_account_id,
+            connection_lookup_result="not_found" if isinstance(exc, ConnectionNotFoundError) else "invalid_binding",
+        ) from exc
 
 
 def _canonical_event(

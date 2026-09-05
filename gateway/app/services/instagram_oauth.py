@@ -236,7 +236,12 @@ class InstagramOAuthService:
                 await client.aclose()
         if not isinstance(payload, dict):
             raise InstagramOAuthError("Instagram account discovery returned malformed data", status_code=502)
-        account_id = str(payload.get("id") or payload.get("user_id") or "").strip()
+        # Instagram Login returns both an app-scoped ``id`` and the Instagram
+        # professional-account ``user_id``. Meta places the latter in the
+        # ``entry.id`` of Instagram messaging webhooks, so it is the stable
+        # provider-account key used by the webhook resolver. Keep ``id`` only
+        # as a compatibility fallback for responses that omit ``user_id``.
+        account_id = str(payload.get("user_id") or payload.get("id") or "").strip()
         if not account_id:
             raise InstagramOAuthError("No supported Instagram professional account was discovered", status_code=422)
         account_type = _optional_str(payload.get("account_type"))
