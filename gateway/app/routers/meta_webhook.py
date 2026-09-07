@@ -430,6 +430,8 @@ async def receive_meta_webhook(request: Request) -> dict[str, Any]:
     _trace("signature", request_id=request_id, started_at=started_at, result="valid")
 
     if webhook_object == "instagram":
+        logger.info("[INSTAGRAM][WEBHOOK_RECEIVED] Meta Instagram webhook accepted for parsing", request_id=request_id)
+        logger.info("[INSTAGRAM][SIGNATURE_VALID] Meta Instagram signature validated", request_id=request_id)
         try:
             canonical = process_instagram_webhook(payload, request_id=request_id)
         except InstagramWebhookError as exc:
@@ -444,6 +446,9 @@ async def receive_meta_webhook(request: Request) -> dict[str, Any]:
                 connection_lookup_result=exc.connection_lookup_result,
             )
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        for event in canonical:
+            transport = event.get("transport") if isinstance(event.get("transport"), dict) else {}
+            logger.info("[INSTAGRAM][CONNECTION_RESOLVED] provider account resolved to active connection", request_id=request_id, connection_id=transport.get("connectionRef"), provider_account_id=transport.get("providerAccountRef"))
         try:
             persisted = get_core_inbound_dispatcher().persist_many(canonical)
         except CoreInboundPersistenceError as exc:
@@ -466,7 +471,7 @@ async def receive_meta_webhook(request: Request) -> dict[str, Any]:
         )
         for event in canonical:
             logger.info(
-                "instagram_webhook_canonical_event_created",
+                "[INSTAGRAM][EVENT_NORMALIZED] canonical inbound event created",
                 request_id=request_id,
                 event_id=event["eventId"],
                 provider_account_id=event["transport"]["providerAccountRef"],
@@ -474,7 +479,11 @@ async def receive_meta_webhook(request: Request) -> dict[str, Any]:
                 provider="meta",
                 channel_type="instagram",
                 event_type=event["eventType"],
+                provider_message_id=(event.get("message") or {}).get("providerMessageId"),
+                correlation_id=(event.get("trace") or {}).get("correlationId"),
             )
+        for delivery in persisted:
+            logger.info("[INSTAGRAM][OUTBOX_CREATED] canonical event persisted in durable outbox", request_id=request_id, event_id=delivery.get("eventId"), connection_id=delivery.get("connectionId"), provider_account_id=delivery.get("providerAccountId"), status=delivery.get("status"), created=delivery.get("createdAt"))
         # G3 intentionally stops at the G4 handoff boundary. No Core dispatch,
         # inbound entity persistence or background task is created here.
         result = {"status": "ok", "object": "instagram", "canonicalEvents": len(canonical), "acknowledged": messaging_count}

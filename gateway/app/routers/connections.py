@@ -29,6 +29,7 @@ from app.services.credential_manager import ProviderAccountReference, get_creden
 from app.services.core_control_plane import CoreControlPlaneError, get_core_control_plane_client
 from app.services.gateway_settings import get_gateway_settings_service
 from app.services.normalization import list_logical_messages
+from app.services.core_inbound_dispatcher import get_core_inbound_dispatcher
 from app.services.instagram_oauth import InstagramOAuthError, InstagramOAuthIntent, InstagramOAuthService, InstagramOAuthStateStore
 
 
@@ -253,6 +254,15 @@ async def list_instagram_messages(connection_id: str, request: Request, limit: i
     require_reviewer_connection_access(request, connection)
     _service.require_instagram_meta_connection(connection_id)
     return {"items": list_logical_messages(connection_id, limit=limit)}
+
+
+@router.get("/{connection_id}/instagram/inbound-deliveries")
+async def list_instagram_inbound_deliveries(connection_id: str, request: Request, limit: int = Query(default=200, ge=1, le=500)):
+    """Expose the safe, durable G4 delivery trace for this Instagram connection."""
+    connection = await _service.get_connection(connection_id)
+    require_reviewer_connection_access(request, connection)
+    _service.require_instagram_meta_connection(connection_id)
+    return {"items": get_core_inbound_dispatcher().list_connection_deliveries(connection_id, limit=limit)}
 
 
 @router.get("/{connection_id}/messages")

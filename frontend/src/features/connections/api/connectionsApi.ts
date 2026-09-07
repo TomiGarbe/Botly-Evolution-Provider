@@ -109,6 +109,30 @@ export interface CoreChannelOption {
   status: string
 }
 
+export interface InstagramInboundDelivery {
+  id: string
+  event_id: string | null
+  provider_account_id: string | null
+  core_channel_id: string | null
+  status: string
+  attempt_count: number
+  created_at: number | null
+  updated_at: number | null
+  last_attempt_at: number | null
+  delivered_at: number | null
+  last_error: string | null
+  duplicate_acknowledged: boolean
+  provider_message_id: string | null
+  event_type: string | null
+  kind: string | null
+  text: string | null
+  sender_external_id: string | null
+  recipient_external_id: string | null
+  attachments: Array<{ kind?: string; providerMediaId?: string; mimeType?: string; fileName?: string; size?: number | null }>
+  request_id: string | null
+  correlation_id: string | null
+}
+
 export async function getInstagramReadiness(connectionId: string): Promise<InstagramReadiness> {
   return gatewayRequest<InstagramReadiness>(`/connections/${encodeURIComponent(connectionId)}/instagram/readiness`, { cache: 'no-store' })
 }
@@ -128,4 +152,9 @@ export async function bindInstagramCoreChannel(connectionId: string, coreChannel
 export async function disconnectInstagram(connectionId: string): Promise<Connection> {
   const payload = await gatewayRequest<ApiConnection>(`/connections/${encodeURIComponent(connectionId)}/instagram/disconnect`, { method: 'POST' })
   return toConnection(payload)
+}
+
+export async function listInstagramInboundDeliveries(connectionId: string): Promise<InstagramInboundDelivery[]> {
+  const payload = await gatewayRequest<{ items: InstagramInboundDelivery[] }>(`/connections/${encodeURIComponent(connectionId)}/instagram/inbound-deliveries?limit=200`, { cache: 'no-store' })
+  return Array.isArray(payload.items) ? payload.items : []
 }

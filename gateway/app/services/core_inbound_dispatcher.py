@@ -136,6 +136,18 @@ class CoreInboundDeliveryStore:
         with _LOCK:
             return deepcopy(self._read_unlocked()["deliveries"])
 
+    def list_for_connection(self, connection_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        """Return the bounded, connection-scoped view used by operations UI.
+
+        The canonical event itself stays in the durable store, but callers must
+        project it before returning it to a browser.  That prevents a future
+        canonical-field addition from accidentally becoming an API exposure.
+        """
+        requested = _text(connection_id)
+        deliveries = [item for item in self.list() if _text(item.get("connectionId")) == requested]
+        deliveries.sort(key=lambda item: _as_int(item.get("createdAt")), reverse=True)
+        return deliveries[:max(1, limit)]
+
     def claim_due(self, *, limit: int, lease_seconds: int) -> list[dict[str, Any]]:
         now = _now()
         claimed: list[dict[str, Any]] = []
@@ -248,6 +260,34 @@ class CoreInboundDispatcher:
             )
         return persisted
 
+    def list_connection_deliveries(self, connection_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        """Safe operational projection of Instagram's Gateway -> Core outbox."""
+        items: list[dict[str, Any]] = []
+        for delivery in self._store.list_for_connection(connection_id, limit=limit):
+            event = delivery.get("canonicalEvent") if isinstance(delivery.get("canonicalEvent"), dict) else {}
+            message = event.get("message") if isinstance(event.get("message"), dict) else {}
+            sender = message.get("sender") if isinstance(message.get("sender"), dict) else {}
+            recipient = message.get("recipient") if isinstance(message.get("recipient"), dict) else {}
+            trace = event.get("trace") if isinstance(event.get("trace"), dict) else {}
+            attachments = message.get("attachments") if isinstance(message.get("attachments"), list) else []
+            # Explicit allow-list. Do not return canonical metadata, headers,
+            # credentials, or a provider payload from this operator endpoint.
+            items.append({
+                "id": delivery.get("id"), "event_id": delivery.get("eventId"),
+                "provider_account_id": delivery.get("providerAccountId"),
+                "core_channel_id": delivery.get("coreChannelId"), "status": delivery.get("status"),
+                "attempt_count": delivery.get("attemptCount", 0), "created_at": delivery.get("createdAt"),
+                "updated_at": delivery.get("updatedAt"), "last_attempt_at": delivery.get("lastAttemptAt"),
+                "delivered_at": delivery.get("deliveredAt"), "last_error": delivery.get("lastError"),
+                "duplicate_acknowledged": bool(delivery.get("duplicateAcknowledged")),
+                "provider_message_id": message.get("providerMessageId"), "event_type": event.get("eventType"),
+                "kind": message.get("kind"), "text": message.get("content"),
+                "sender_external_id": sender.get("externalId"), "recipient_external_id": recipient.get("externalId"),
+                "attachments": [{key: attachment.get(key) for key in ("kind", "providerMediaId", "mimeType", "fileName", "size")} for attachment in attachments if isinstance(attachment, dict)],
+                "request_id": trace.get("requestId"), "correlation_id": trace.get("correlationId"),
+            })
+        return items
+
     async def dispatch_due(self) -> int:
         settings = self._settings_factory()
         claimed = self._store.claim_due(
@@ -278,11 +318,14 @@ class CoreInboundDispatcher:
             self._permanent(delivery, "core_channel_credential_missing")
             return
         logger.info(
-            "core_inbound_delivery_attempt",
+            "[INSTAGRAM][CORE_DISPATCH_STARTED] canonical delivery attempt",
             event_id=event_id,
             connection_id=connection_id,
             provider_account_id=delivery["providerAccountId"],
             core_channel_id=core_channel_id,
+            request_id=((delivery.get("canonicalEvent") or {}).get("trace") or {}).get("requestId"),
+            correlation_id=((delivery.get("canonicalEvent") or {}).get("trace") or {}).get("correlationId"),
+            provider_message_id=((delivery.get("canonicalEvent") or {}).get("message") or {}).get("providerMessageId"),
             attempt=delivery["attemptCount"],
             status="delivering",
         )
@@ -304,7 +347,7 @@ class CoreInboundDispatcher:
         elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
         if 200 <= response.status_code < 300:
             self._store.complete(delivery_id)
-            logger.info("core_inbound_delivery_success", event_id=event_id, connection_id=connection_id, provider_account_id=delivery["providerAccountId"], core_channel_id=core_channel_id, attempt=delivery["attemptCount"], status=response.status_code, latency_ms=elapsed_ms)
+            logger.info("[INSTAGRAM][CORE_DISPATCH_SUCCESS] canonical delivery acknowledged", event_id=event_id, connection_id=connection_id, provider_account_id=delivery["providerAccountId"], core_channel_id=core_channel_id, request_id=((delivery.get("canonicalEvent") or {}).get("trace") or {}).get("requestId"), correlation_id=((delivery.get("canonicalEvent") or {}).get("trace") or {}).get("correlationId"), provider_message_id=((delivery.get("canonicalEvent") or {}).get("message") or {}).get("providerMessageId"), attempt=delivery["attemptCount"], status=response.status_code, latency_ms=elapsed_ms)
             return
         # B4's canonical inbound endpoint treats an idempotent conflict as an
         # already-processed event. It is a logical delivery success, not a new
@@ -325,11 +368,13 @@ class CoreInboundDispatcher:
             max_attempts=max(1, int(getattr(settings, "core_inbound_delivery_max_attempts", 5))),
             backoff_seconds=max(0, int(getattr(settings, "core_inbound_delivery_backoff_base_seconds", 5))),
         )
-        logger.warning("core_inbound_delivery_retry" if result["status"] == "retry" else "core_inbound_delivery_dead_letter", event_id=result["eventId"], connection_id=result["connectionId"], provider_account_id=result["providerAccountId"], core_channel_id=result.get("coreChannelId"), attempt=result["attemptCount"], status=result["status"], error=error)
+        canonical = result.get("canonicalEvent") if isinstance(result.get("canonicalEvent"), dict) else {}
+        logger.warning("[INSTAGRAM][CORE_DISPATCH_FAILED] canonical delivery will retry" if result["status"] == "retry" else "[INSTAGRAM][CORE_DISPATCH_FAILED] canonical delivery dead-lettered", event_id=result["eventId"], connection_id=result["connectionId"], provider_account_id=result["providerAccountId"], core_channel_id=result.get("coreChannelId"), request_id=((canonical.get("trace") or {}).get("requestId")), correlation_id=((canonical.get("trace") or {}).get("correlationId")), provider_message_id=((canonical.get("message") or {}).get("providerMessageId")), attempt=result["attemptCount"], status=result["status"], error=error)
 
     def _permanent(self, delivery: dict[str, Any], error: str) -> None:
         result = self._store.fail_permanently(_text(delivery.get("id")), error=error)
-        logger.warning("core_inbound_delivery_permanent_failure", event_id=result["eventId"], connection_id=result["connectionId"], provider_account_id=result["providerAccountId"], core_channel_id=result.get("coreChannelId"), attempt=result["attemptCount"], status=result["status"], error=error)
+        canonical = result.get("canonicalEvent") if isinstance(result.get("canonicalEvent"), dict) else {}
+        logger.warning("[INSTAGRAM][CORE_DISPATCH_FAILED] canonical delivery permanently rejected", event_id=result["eventId"], connection_id=result["connectionId"], provider_account_id=result["providerAccountId"], core_channel_id=result.get("coreChannelId"), request_id=((canonical.get("trace") or {}).get("requestId")), correlation_id=((canonical.get("trace") or {}).get("correlationId")), provider_message_id=((canonical.get("message") or {}).get("providerMessageId")), attempt=result["attemptCount"], status=result["status"], error=error)
 
 
 class CoreInboundDeliveryWorker:

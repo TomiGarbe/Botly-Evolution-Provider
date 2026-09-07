@@ -158,6 +158,22 @@ def test_dedupes_event_id_but_scopes_provider_message_ids_by_account(tmp_path) -
     assert len(store.list()) == 2
 
 
+def test_connection_delivery_projection_has_trace_evidence_without_credentials(monkeypatch, tmp_path) -> None:
+    dispatcher, _store, connection = _bound_dispatcher(monkeypatch, tmp_path, lambda _request: httpx.Response(202))
+    event = _event(connection_id=connection.id)
+    event["message"]["attachments"] = [{"kind": "image", "providerMediaId": "media-1", "url": "https://private.example/media", "metadata": {"not": "public"}}]
+    dispatcher.persist(event)
+
+    item = dispatcher.list_connection_deliveries(connection.id)[0]
+    assert item["event_id"] == "event-1"
+    assert item["provider_message_id"] == "mid-1"
+    assert item["sender_external_id"] == "instagram_user_abc"
+    assert item["request_id"] == "request-1"
+    assert item["attachments"] == [{"kind": "image", "providerMediaId": "media-1", "mimeType": None, "fileName": None, "size": None}]
+    assert "meta-access-token-must-not-leave-gateway" not in json.dumps(item)
+    assert "private.example" not in json.dumps(item)
+
+
 @pytest.mark.parametrize("status", [400, 401, 403, 422])
 def test_core_client_errors_are_permanent(monkeypatch, tmp_path, status) -> None:
     dispatcher, store, connection = _bound_dispatcher(monkeypatch, tmp_path, lambda _request: httpx.Response(status))

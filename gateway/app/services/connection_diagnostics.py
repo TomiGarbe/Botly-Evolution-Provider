@@ -7,6 +7,8 @@ from app.connections import ConnectionManager, get_connection_manager
 from app.core.config import get_settings
 from app.services.connection_registry import ConnectionRegistry, get_connection_registry
 from app.services.credential_manager import CredentialManager, ProviderAccountReference, get_credential_manager
+from app.services.core_channel_credentials import get_core_channel_credential_store
+from app.services.core_inbound_dispatcher import get_core_inbound_dispatcher
 from app.services.instance_webhooks import list_instance_webhooks
 from app.services.normalization import list_events
 
@@ -133,8 +135,16 @@ class ConnectionDiagnosticsService:
         missing_scopes = sorted(required_scopes - set(credential.scopes if credential else ()))
         binding = record.get("core_channel") if isinstance(record.get("core_channel"), dict) else {}
         core_channel_id = str(binding.get("channelId") or "").strip()
-        webhooks = list_instance_webhooks(str(record.get("legacy_name") or ""), reveal_secrets=False)
-        webhook = next((item for item in webhooks if item.get("enabled")), None)
+        core_credential = None
+        if core_channel_id:
+            try:
+                core_credential = get_core_channel_credential_store().get_api_key(connection_id=connection_id, core_channel_id=core_channel_id)
+            except Exception:
+                core_credential = None
+        deliveries = get_core_inbound_dispatcher().list_connection_deliveries(connection_id, limit=500)
+        latest_delivery = deliveries[0] if deliveries else None
+        latest_delivery_error = next((item for item in deliveries if item.get("status") in {"failed", "dead_letter"} or item.get("last_error")), None)
+        webhook = None  # Not part of the Instagram -> Core inbound route.
         events = self._events_reader(instance=connection_id, limit=500)
         latest_error = next((event for event in events if self._is_error(event)), None)
         last_sent = next((event for event in events if event.get("direction") == "outbound" and event.get("type") == "message"), None)
@@ -150,9 +160,17 @@ class ConnectionDiagnosticsService:
             self._check("core_channel", "Canal de Botly", "healthy" if core_channel_id else "degraded", str(record.get("updated_at") or now), "Hay un canal de Botly vinculado." if core_channel_id else "No hay un canal de Botly vinculado.", "Vinculá un canal de Botly para habilitar el handoff duradero." if not core_channel_id else None),
             self._check("outbound_webhook", "Destino webhook", "healthy" if webhook else "degraded", str((webhook or {}).get("lastUsedAt") or now), "Hay un destino webhook activo." if webhook else "No hay un destino webhook activo.", "Configurá un destino desde la pestaña Webhooks." if not webhook else None),
         ]
+        # A configurable instance webhook is unrelated to canonical inbound
+        # delivery, so do not let it misdiagnose an Instagram connection.
+        checks = [check for check in checks if check["code"] != "outbound_webhook"]
+        checks.extend([
+            self._check("core_credential", "Core channel credential", "healthy" if core_credential else "unhealthy", str(record.get("updated_at") or now), "Core delivery credential is available." if core_credential else "Core delivery credential is missing.", "Bind the Botly Core channel again." if not core_credential else None),
+            self._check("core_endpoint", "Core endpoint", "healthy" if bool(getattr(settings, "core_inbound_url", "")) else "unhealthy", now, "Canonical Core endpoint is configured." if bool(getattr(settings, "core_inbound_url", "")) else "CORE_INBOUND_URL is missing in Gateway.", "Configure CORE_INBOUND_URL and restart Gateway." if not bool(getattr(settings, "core_inbound_url", "")) else None),
+            self._check("inbound_delivery", "Latest inbound delivery", "unknown" if latest_delivery is None else "healthy" if latest_delivery.get("status") == "delivered" else "unhealthy" if latest_delivery.get("status") in {"failed", "dead_letter"} else "degraded", str((latest_delivery or {}).get("updated_at") or now), "No Instagram inbound events have been received yet." if latest_delivery is None else f"Outbox status: {latest_delivery.get('status')}.", "Review the delivery error and Core channel binding." if latest_delivery and latest_delivery.get("status") in {"failed", "dead_letter"} else None),
+        ])
         overall = "unhealthy" if any(item["status"] == "unhealthy" for item in checks) else "degraded" if any(item["status"] == "degraded" for item in checks) else "healthy"
         return {
-            "summary": {"status": overall, "last_verified_at": now, "last_heartbeat_at": record.get("last_heartbeat_at"), "last_message_sent_at": _event_time(last_sent) if last_sent else None, "last_message_received_at": _event_time(last_received) if last_received else None, "last_webhook_success_at": (webhook or {}).get("lastSuccessAt"), "last_error": self._error_message(latest_error)},
+            "summary": {"status": overall, "last_verified_at": now, "last_heartbeat_at": record.get("last_heartbeat_at"), "last_message_sent_at": _event_time(last_sent) if last_sent else None, "last_message_received_at": _event_time(last_received) if last_received else None, "last_webhook_success_at": None, "last_error": str((latest_delivery_error or {}).get("last_error") or self._error_message(latest_error) or "")[:300] or None},
             "checks": checks,
             "technical": {"phone_number_id": None, "business_id": account_id or None, "waba_id": None, "provider": "Meta", "channel": "Instagram", "api_version": getattr(settings, "meta_graph_version", None), "last_synchronized_at": credential.updated_at if credential else record.get("updated_at")},
         }
