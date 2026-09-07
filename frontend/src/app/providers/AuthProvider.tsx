@@ -8,6 +8,7 @@ export type { AuthUser } from './authApi'
 interface AuthContextValue {
   user: AuthUser | null
   googleClientId: string
+  googleConfigUnavailable: boolean
   isLoading: boolean
   accessDenied: boolean
   signInWithGoogle: (credential: string) => Promise<void>
@@ -23,17 +24,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true)
   const [accessDenied, setAccessDenied] = useState(false)
   const [googleClientId, setGoogleClientId] = useState(environment.googleClientId)
+  const [googleConfigUnavailable, setGoogleConfigUnavailable] = useState(false)
 
   useEffect(() => {
     let active = true
     void Promise.all([
       getCurrentUser().catch(() => null),
-      getGoogleClientId().catch(() => environment.googleClientId),
+      getGoogleClientId().then((clientId) => ({ clientId, unavailable: false })).catch(() => ({ clientId: environment.googleClientId, unavailable: true })),
     ])
-      .then(([nextUser, configuredGoogleClientId]) => {
+      .then(([nextUser, googleConfig]) => {
         if (!active) return
         setUser(nextUser)
-        setGoogleClientId(configuredGoogleClientId || environment.googleClientId)
+        setGoogleClientId(googleConfig.clientId || environment.googleClientId)
+        setGoogleConfigUnavailable(googleConfig.unavailable)
       })
       .finally(() => { if (active) setIsLoading(false) })
     return () => { active = false }
@@ -67,13 +70,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const value = useMemo<AuthContextValue>(() => ({
     user,
     googleClientId,
+    googleConfigUnavailable,
     isLoading,
     accessDenied,
     signInWithGoogle,
     signInWithEmail,
     signOut,
     clearAccessDenied: () => setAccessDenied(false),
-  }), [accessDenied, googleClientId, isLoading, signInWithEmail, signInWithGoogle, signOut, user])
+  }), [accessDenied, googleClientId, googleConfigUnavailable, isLoading, signInWithEmail, signInWithGoogle, signOut, user])
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

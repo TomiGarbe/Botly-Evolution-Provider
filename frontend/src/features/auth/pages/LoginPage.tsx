@@ -33,7 +33,7 @@ function loadGoogleAccounts(): Promise<GoogleAccounts> {
 
 export function LoginPage() {
   const host = useRef<HTMLDivElement>(null)
-  const { user, googleClientId, isLoading, accessDenied, signInWithGoogle, signInWithEmail } = useAuth()
+  const { user, googleClientId, googleConfigUnavailable, isLoading, accessDenied, signInWithGoogle, signInWithEmail } = useAuth()
   const [isGoogleReady, setIsGoogleReady] = useState(false)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -93,7 +93,7 @@ export function LoginPage() {
           <div ref={host} className="auth-google-button" aria-label="Continuar con Google" />
           {!isGoogleReady && !isLoading ? <LoaderCircle size={18} className="auth-loading animate-spin" aria-label="Cargando Google" /> : null}
         </div>
-      </> : <p className="auth-unavailable">Google no está configurado.</p>}
+      </> : <p className="auth-unavailable">{googleConfigUnavailable ? 'No se pudo cargar la autenticación con Google. Revisá la conexión con el Gateway.' : 'Google no está configurado.'}</p>}
       <p className="auth-private">Acceso privado · no hay registro público</p>
     </section>
   </main>
