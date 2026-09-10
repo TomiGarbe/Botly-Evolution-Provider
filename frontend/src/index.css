@@ -221,10 +221,10 @@
   .instagram-oauth-card > svg { @apply text-emerald-400; }
   .instagram-title { @apply flex items-center gap-2; }
   .instagram-title h3 { @apply m-0; }
-  .instagram-readiness-list { @apply my-5 grid list-none gap-2 p-0 text-sm text-zinc-300 sm:grid-cols-2; }
-  .instagram-readiness-list li { @apply flex items-center gap-2; }
-  .instagram-readiness-list svg { @apply text-emerald-400; }
-  .instagram-readiness-list li:has(svg[data-lucide='circle-alert']) svg { @apply text-amber-400; }
+  .connection-readiness-list { @apply my-5 grid list-none gap-2 p-0 text-sm text-zinc-300 sm:grid-cols-2; }
+  .connection-readiness-list li { @apply flex items-center gap-2; }
+  .connection-readiness-list svg { @apply text-emerald-400; }
+  .connection-readiness-list li:has(svg[data-lucide='circle-alert']) svg { @apply text-amber-400; }
   .instagram-channel-binding { @apply mt-5 rounded-lg border border-zinc-800 bg-zinc-950/30 p-4; }
   .instagram-channel-binding h4 { @apply m-0 text-sm font-semibold text-zinc-100; }
   .instagram-channel-binding p { @apply mb-4 mt-1 text-sm text-zinc-400; }

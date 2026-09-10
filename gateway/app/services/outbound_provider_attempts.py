@@ -54,6 +54,23 @@ def _safe_media_reference(media: dict[str, Any] | None) -> dict[str, Any] | None
     }
 
 
+def _same_canonical_idempotency_scope(existing: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """Compare only the explicit canonical delivery identity.
+
+    A recipient remains an opaque external identifier here.  Do not derive a
+    phone number, JID, or provider-specific equivalent for deduplication.
+    """
+    return (
+        str(existing.get("canonicalChannelId") or "") == str(candidate.get("canonicalChannelId") or "")
+        # New canonical attempts retain the pre-mapping Core identifier.  The
+        # fallback preserves the behavior of records written before this field
+        # existed, while all new attempts compare the exact opaque externalId.
+        and str(existing.get("canonicalRecipientExternalId") or existing.get("recipient") or "")
+        == str(candidate.get("canonicalRecipientExternalId") or candidate.get("recipient") or "")
+        and str(existing.get("idempotencyKey") or "") == str(candidate.get("idempotencyKey") or "")
+    )
+
+
 def _fingerprint(payload: dict[str, Any]) -> str:
     encoded = json.dumps(SecretRedactor.redact_json(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -115,8 +132,106 @@ class OutboundProviderAttemptStore:
         provider_operation: str | None = None, media: dict[str, Any] | None = None,
         message_id: str | None = None, conversation_id: str | None = None,
         idempotency_key: str | None = None,
+        canonical_channel_id: str | None = None,
+        canonical_recipient_external_id: str | None = None,
         retry_of_attempt_id: str | None = None, triggered_by_manual_action_id: str | None = None,
         source_delivery_id: str | None = None,
+    ) -> dict[str, Any]:
+        attempt = self._build_attempt(
+            instance=instance,
+            provider=provider,
+            message_type=message_type,
+            recipient=recipient,
+            text=text,
+            caption=caption,
+            correlation_id=correlation_id,
+            request_id=request_id,
+            operation=operation,
+            provider_operation=provider_operation,
+            media=media,
+            message_id=message_id,
+            conversation_id=conversation_id,
+            idempotency_key=idempotency_key,
+            canonical_channel_id=canonical_channel_id,
+            canonical_recipient_external_id=canonical_recipient_external_id,
+            retry_of_attempt_id=retry_of_attempt_id,
+            triggered_by_manual_action_id=triggered_by_manual_action_id,
+            source_delivery_id=source_delivery_id,
+        )
+        try:
+            with _LOCK:
+                data = self._read_unlocked()
+                data["attempts"].append(attempt)
+                self._trim_and_write_unlocked(data)
+        except Exception as exc:
+            raise OutboundAttemptPersistenceError("No se pudo persistir el intento outbound") from exc
+        return deepcopy(attempt)
+
+    def create_or_get_by_idempotency(
+        self, *, instance: str, provider: str, message_type: str, recipient: str | None,
+        text: str | None = None, caption: str | None = None, correlation_id: str | None = None,
+        request_id: str | None = None, operation: str = "provider.message.outbound",
+        provider_operation: str | None = None, media: dict[str, Any] | None = None,
+        message_id: str | None = None, conversation_id: str | None = None,
+        idempotency_key: str,
+        canonical_channel_id: str,
+        canonical_recipient_external_id: str,
+        retry_of_attempt_id: str | None = None, triggered_by_manual_action_id: str | None = None,
+        source_delivery_id: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically claim a canonical outbound idempotency scope.
+
+        The durable key is deliberately scoped to the Core Channel and opaque
+        recipient, rather than a provider-specific phone/JID representation.
+        The same process-wide persistence lock guards lookup and insertion, so
+        concurrent canonical requests cannot both issue provider sends.
+        """
+        clean_key = _safe_text(idempotency_key, 128)
+        clean_channel_id = _safe_text(canonical_channel_id, 256)
+        if not clean_key or not clean_channel_id:
+            raise ValueError("canonical idempotency key and channel are required")
+        attempt = self._build_attempt(
+            instance=instance,
+            provider=provider,
+            message_type=message_type,
+            recipient=recipient,
+            text=text,
+            caption=caption,
+            correlation_id=correlation_id,
+            request_id=request_id,
+            operation=operation,
+            provider_operation=provider_operation,
+            media=media,
+            message_id=message_id,
+            conversation_id=conversation_id,
+            idempotency_key=clean_key,
+            canonical_channel_id=clean_channel_id,
+            canonical_recipient_external_id=canonical_recipient_external_id,
+            retry_of_attempt_id=retry_of_attempt_id,
+            triggered_by_manual_action_id=triggered_by_manual_action_id,
+            source_delivery_id=source_delivery_id,
+        )
+        try:
+            with _LOCK:
+                data = self._read_unlocked()
+                for existing in data["attempts"]:
+                    if _same_canonical_idempotency_scope(existing, attempt):
+                        return deepcopy(existing), False
+                data["attempts"].append(attempt)
+                self._trim_and_write_unlocked(data)
+        except Exception as exc:
+            raise OutboundAttemptPersistenceError("No se pudo persistir el intento outbound") from exc
+        return deepcopy(attempt), True
+
+    def _build_attempt(
+        self, *, instance: str, provider: str, message_type: str, recipient: str | None,
+        text: str | None, caption: str | None, correlation_id: str | None,
+        request_id: str | None, operation: str, provider_operation: str | None,
+        media: dict[str, Any] | None, message_id: str | None, conversation_id: str | None,
+        idempotency_key: str | None, canonical_channel_id: str | None,
+        canonical_recipient_external_id: str | None,
+        retry_of_attempt_id: str | None, triggered_by_manual_action_id: str | None,
+        source_delivery_id: str | None,
     ) -> dict[str, Any]:
         registry_record = get_connection_registry().connection_record(instance) or {}
         connection_id = str(registry_record.get("id") or "").strip() or None
@@ -135,27 +250,25 @@ class OutboundProviderAttemptStore:
             "finishedAt": None, "messageId": _safe_text(message_id, 256),
             "conversationId": _safe_text(conversation_id, 256), "channelId": channel_id,
             "correlationId": _safe_text(correlation_id, 256), "requestId": _safe_text(request_id, 256),
-            "providerMessageId": None, "recipient": _safe_text(recipient, 128),
+            "providerMessageId": None, "recipient": _safe_text(recipient, 255),
             "messageType": _safe_text(message_type, 64), "semanticStatus": "unknown",
             "attemptState": "pending", "deliveryState": "pending", "reconciliationState": "pending",
             "error": None, "requestMetadata": {"providerOperation": _safe_text(provider_operation, 128), "hasText": bool(text), "hasCaption": bool(caption)},
             "requestPayload": request_payload, "requestFingerprint": _fingerprint(request_payload),
-            "mediaReference": _safe_media_reference(media), "idempotencyKey": _safe_text(idempotency_key, 128),
+            "mediaReference": _safe_media_reference(media), "idempotencyKey": _safe_text(idempotency_key, 255),
+            "canonicalChannelId": _safe_text(canonical_channel_id, 256),
+            "canonicalRecipientExternalId": _safe_text(canonical_recipient_external_id, 255),
             "retryOf": _safe_text(retry_of_attempt_id, 256),
             "triggeredByManualActionId": _safe_text(triggered_by_manual_action_id, 256),
             "sourceDeliveryId": _safe_text(source_delivery_id, 256), "legacy": False,
         }
         attempt["attemptId"] = attempt["id"]
-        try:
-            with _LOCK:
-                data = self._read_unlocked()
-                data["attempts"].append(attempt)
-                limit = max(1, int(getattr(get_settings(), "outbound_provider_attempt_retention", 2000)))
-                data["attempts"] = data["attempts"][-limit:]
-                self._write_unlocked(data)
-        except Exception as exc:
-            raise OutboundAttemptPersistenceError("No se pudo persistir el intento outbound") from exc
-        return deepcopy(attempt)
+        return attempt
+
+    def _trim_and_write_unlocked(self, data: dict[str, Any]) -> None:
+        limit = max(1, int(getattr(get_settings(), "outbound_provider_attempt_retention", 2000)))
+        data["attempts"] = data["attempts"][-limit:]
+        self._write_unlocked(data)
 
     def finish_success(self, attempt_id: str, result: dict[str, Any] | None) -> dict[str, Any]:
         provider_message_id = _provider_message_id(result)
@@ -290,7 +403,7 @@ def _provider_message_id(result: dict[str, Any] | None) -> str | None:
     key = result.get("key") if isinstance(result.get("key"), dict) else {}
     message = result.get("message") if isinstance(result.get("message"), dict) else {}
     nested_key = message.get("key") if isinstance(message.get("key"), dict) else {}
-    value = result.get("messageId") or key.get("id") or nested_key.get("id")
+    value = result.get("providerMessageId") or result.get("messageId") or key.get("id") or nested_key.get("id")
     return str(value).strip() or None if value is not None else None
 
 
