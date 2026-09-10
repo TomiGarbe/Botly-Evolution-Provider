@@ -1,0 +1,23 @@
+# Credentials and local configuration must never cross the Docker build boundary.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*credential*.json
+*credentials*.json
+*secret*.json
+
+# Development-only files do not belong to the production runtime image.
+.git
+.pytest_cache
+.ruff_cache
+__pycache__
+**/__pycache__/
+*.py[cod]
+**/*.py[cod]
+tests
+examples
+*.log
+*.md

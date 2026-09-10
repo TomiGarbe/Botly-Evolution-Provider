@@ -30,6 +30,7 @@ from app.services.core_control_plane import CoreControlPlaneError, get_core_cont
 from app.services.gateway_settings import get_gateway_settings_service
 from app.services.normalization import list_logical_messages
 from app.services.core_inbound_dispatcher import get_core_inbound_dispatcher
+from app.services.connection_webhook_activity import get_connection_webhook_activity_service
 from app.services.instagram_oauth import InstagramOAuthError, InstagramOAuthIntent, InstagramOAuthService, InstagramOAuthStateStore
 
 
@@ -86,6 +87,8 @@ _INSTAGRAM_CALLBACK_STAGE_DETAILS = {
     "credential_persistence": ("provider_credentials.upsert", "Instagram credential persistence failed"),
     "binding": ("provider_account.binding", "Instagram provider account binding failed"),
     "connection_update": ("connection.update", "Instagram connection update failed"),
+    "core_channel_resolution": ("core_channel.discovery", "Botly Core channel resolution failed"),
+    "core_channel_binding": ("core_channel.binding", "Botly Core channel binding failed"),
     "final_redirect": ("frontend_ui_redirect", "Instagram OAuth final redirect failed"),
 }
 
@@ -123,6 +126,43 @@ def _log_instagram_callback_stage(
         logger.warning("instagram_oauth_callback_stage", **fields)
         return
     logger.info("instagram_oauth_callback_stage", **fields)
+
+
+async def _resolve_instagram_core_channel(connection):
+    """Resolve exactly one tenant-scoped active Instagram channel.
+
+    OAuth never accepts a Core channel ID or dispatch credential from a browser.
+    Choosing between multiple channels would be a tenant-routing decision, so
+    that case remains explicitly pending instead of binding an arbitrary one.
+    """
+    channels = await get_core_control_plane_client().discover_channels(
+        gateway_client_id=connection.client_id,
+        channel_type="instagram",
+    )
+    eligible = [channel for channel in channels if channel.status.lower() == "active"]
+    if len(eligible) != 1:
+        raise CoreControlPlaneError(
+            "Botly Core requires exactly one active Instagram channel for this client",
+            status_code=409,
+        )
+    return eligible[0]
+
+
+async def _bind_instagram_core_channel(connection, channel):
+    """Create the server-owned binding and persist only its encrypted credential."""
+    result = await get_core_control_plane_client().bind(
+        gateway_client_id=connection.client_id,
+        gateway_connection_id=connection.id,
+        core_channel_id=channel.id,
+        channel_type="instagram",
+    )
+    return _service.bind_instagram_core_channel(
+        connection_id=connection.id,
+        core_channel_id=result.channel.id,
+        dispatch_credential=result.dispatch_credential,
+        core_binding_id=result.id,
+        core_channel_name=result.channel.name,
+    )
 
 
 @router.get("/meta/instagram/authorize")
@@ -212,6 +252,17 @@ async def instagram_oauth_callback(
             required_scopes=_instagram_oauth.requested_scopes(),
         )
         _log_instagram_callback_stage(stage=stage, outcome="passed", intent=intent)
+        # A persisted binding without a decryptable dispatch credential is not
+        # usable. Re-request the server-owned binding rather than reporting
+        # OAuth success for a connection that cannot deliver inbound events.
+        if not _service.instagram_readiness(connection.id, required_scopes=_instagram_oauth.requested_scopes()).get("coreDeliveryReady"):
+            connection = _service.mark_instagram_core_delivery_pending(connection.id)
+            stage = "core_channel_resolution"
+            channel = await _resolve_instagram_core_channel(connection)
+            _log_instagram_callback_stage(stage=stage, outcome="passed", intent=intent)
+            stage = "core_channel_binding"
+            connection = await _bind_instagram_core_channel(connection, channel)
+            _log_instagram_callback_stage(stage=stage, outcome="passed", intent=intent)
         if intent.ui_return:
             stage = "final_redirect"
             redirect_url = _instagram_ui_callback_url(intent.connection_id, "success")
@@ -228,6 +279,11 @@ async def instagram_oauth_callback(
         if intent and intent.ui_return:
             return RedirectResponse(_instagram_ui_callback_url(intent.connection_id, ui_outcome), status_code=status.HTTP_303_SEE_OTHER)
         raise HTTPException(status_code=getattr(exc, "status_code", 422), detail=str(exc))
+    except CoreControlPlaneError as exc:
+        _log_instagram_callback_stage(stage=stage, outcome="failed", intent=intent, error=exc)
+        if intent and intent.ui_return:
+            return RedirectResponse(_instagram_ui_callback_url(intent.connection_id, "failed"), status_code=status.HTTP_303_SEE_OTHER)
+        raise _core_control_plane_http_error(exc)
     except Exception as exc:
         _log_instagram_callback_stage(stage=stage, outcome="failed", intent=intent, error=exc)
         if intent and intent.ui_return:
@@ -456,6 +512,17 @@ async def get_connection_webhook_deliveries(connection_id: str, limit: int = Que
     try:
         return _operations.webhook_deliveries(connection_id, limit=limit)
     except KeyError:
+        raise HTTPException(status_code=404, detail="Connection not found")
+
+
+@router.get("/{connection_id}/webhook/activity")
+async def get_connection_webhook_activity(connection_id: str, request: Request, limit: int = Query(default=100, ge=1, le=200)):
+    """Provider-neutral, safe transport activity for the Connection workspace."""
+    try:
+        connection = await _service.get_connection(connection_id)
+        require_reviewer_connection_access(request, connection)
+        return {"items": get_connection_webhook_activity_service().list(connection_id, limit=limit)}
+    except (ConnectionNotFoundError, KeyError):
         raise HTTPException(status_code=404, detail="Connection not found")
 
 

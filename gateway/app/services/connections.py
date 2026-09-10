@@ -271,7 +271,22 @@ class ConnectionService:
         missing = sorted(set(required_scopes) - set(credential.scopes))
         if missing:
             return {"state": "missing_scopes", "ready": False, "configured": True, "authenticated": True, "accountDiscovered": True, "credentialValid": True, "missingScopes": missing, "tokenExpiry": expiry}
-        return {"state": "ready", "ready": True, "configured": True, "authenticated": True, "accountDiscovered": True, "credentialValid": True, "requiredScopesPresent": True, "tokenExpiry": expiry}
+        core_binding = self.instagram_core_channel_binding(connection_id)
+        core_credential_valid = False
+        if core_binding:
+            try:
+                core_credential_valid = bool(self._core_channel_credentials.get_api_key(
+                    connection_id=connection_id, core_channel_id=core_binding["channelId"]
+                ))
+            except Exception:
+                core_credential_valid = False
+        return {
+            "state": "ready", "ready": True, "configured": True, "authenticated": True,
+            "accountDiscovered": True, "credentialValid": True, "requiredScopesPresent": True,
+            "tokenExpiry": expiry, "coreBindingPresent": bool(core_binding),
+            "coreCredentialValid": core_credential_valid,
+            "coreDeliveryReady": bool(core_binding) and core_credential_valid,
+        }
 
     def bind_instagram_provider_account(
         self,
@@ -301,6 +316,17 @@ class ConnectionService:
                 "status_health": "healthy",
                 "updated_at": _now(),
             },
+        )
+        if updated is None:
+            raise ConnectionNotFoundError(connection_id)
+        return self._stored_connection(updated)
+
+    def mark_instagram_core_delivery_pending(self, connection_id: str) -> Connection:
+        """Keep a completed OAuth connection out of inbound service until Core binds."""
+        self.require_instagram_meta_connection(connection_id)
+        updated = self._registry.update_connection_record(
+            connection_id,
+            {"status_state": "connecting", "status_health": "unknown", "updated_at": _now()},
         )
         if updated is None:
             raise ConnectionNotFoundError(connection_id)
@@ -336,9 +362,11 @@ class ConnectionService:
     async def send_instagram_text(self, *, connection_id: str, external_id: str, text: str, provider: MetaInstagramProvider | None = None) -> dict[str, Any]:
         """Send text through the provider adapter; externalId is never normalized as a phone."""
         record = self.require_instagram_meta_connection(connection_id)
-        recipient = str(external_id or "").strip()
+        # Instagram contact IDs are opaque Core identities.  Do not trim or
+        # normalize them as phone numbers/JIDs; only reject an empty value.
+        recipient = str(external_id or "")
         content = str(text or "").strip()
-        if not recipient:
+        if not recipient.strip():
             raise ValueError("Instagram recipient externalId is required")
         if not content:
             raise ValueError("Instagram text is required")
@@ -350,10 +378,18 @@ class ConnectionService:
         token = self._credentials.get_provider_access_token(account)
         if not token:
             raise UnsupportedConnectionProviderError("Instagram credentials are unavailable")
+        account_metadata = binding.get("metadata") if isinstance(binding.get("metadata"), dict) else {}
+        # A connection may explicitly provide a Graph send node distinct from
+        # its account identity.  Existing Instagram Login connections use the
+        # professional account as both identities, so retain that compatible
+        # fallback until the connection model stores a separate node.
+        graph_send_node_id = str(account_metadata.get("graphSendNodeId") or account_id).strip()
+        if not graph_send_node_id:
+            raise UnsupportedConnectionProviderError("Instagram Graph send node is unavailable")
         channel = ProvisionedChannel(
             id=f"connection:{connection_id}", channel_id=ChannelId.INSTAGRAM, method_id=MethodId.OFFICIAL,
             integration_id="instagram.official.meta", runtime_id=RuntimeId.META, display_name=str(record.get("name") or "Instagram"),
-            status=ChannelStatus.ACTIVE, metadata={"graphSendNodeId": account_id},
+            status=ChannelStatus.ACTIVE, metadata={"graphSendNodeId": graph_send_node_id},
         )
         canonical = {"channel": {"channelType": "instagram"}, "recipient": {"externalId": recipient}, "message": {"type": "text", "text": content}}
         result = await (provider or MetaInstagramProvider()).send_text(channel=channel, recipient_id=recipient, text=content, access_token=token)
@@ -397,6 +433,8 @@ class ConnectionService:
                     "bindingId": str(core_binding_id),
                     "name": str(core_channel_name or "").strip() or None,
                 },
+                "status_state": "connected",
+                "status_health": "healthy",
                 "updated_at": _now(),
             },
         )

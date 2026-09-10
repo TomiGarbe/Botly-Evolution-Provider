@@ -1,34 +1,10 @@
 from __future__ import annotations
 
-import sys
 import os
-from types import ModuleType
 
 os.environ["DEBUG"] = "false"
 os.environ.setdefault("GATEWAY_API_KEY", "test-gateway-key")
 os.environ.setdefault("EVOLUTION_API_KEY", "test-evolution-key")
-
-
-class _FakeLogger:
-    def bind(self, **kwargs):
-        return self
-
-    def info(self, *args, **kwargs):
-        return None
-
-    def warning(self, *args, **kwargs):
-        return None
-
-    def error(self, *args, **kwargs):
-        return None
-
-    def debug(self, *args, **kwargs):
-        return None
-
-
-_fake_structlog = ModuleType("structlog")
-_fake_structlog.get_logger = lambda *args, **kwargs: _FakeLogger()
-sys.modules.setdefault("structlog", _fake_structlog)
 
 from app.services.event_pipeline import process_incoming_webhook, settings  # noqa: E402
 from app.services.group_messages import group_message_audit_context, is_group_message  # noqa: E402

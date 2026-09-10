@@ -7,7 +7,7 @@ import { LoadingState } from '@/shared/components/LoadingState'
 import { Toast } from '@/shared/components/Toast'
 import { createWebhook, deleteWebhook, listWebhooks, setWebhookEnabled, testWebhook, updateWebhook, type WebhookInput, type WebhookRecord, type WebhookTestResult } from '@/features/webhooks/api/webhooksApi'
 import { WebhookForm } from '@/features/webhooks/components/WebhookForm'
-import { WebhookActivityTimeline } from './WebhookActivityTimeline'
+import { ConnectionWebhookActivity } from './ConnectionWebhookActivity'
 import { WebhookTestPanel } from './WebhookTestPanel'
 
 function dateTime(value: string | null): string {
@@ -41,7 +41,6 @@ export function ConnectionWebhooks({ connection }: { connection: Connection }) {
   const [webhookToDelete, setWebhookToDelete] = useState<WebhookRecord | null>(null)
   const [testResult, setTestResult] = useState<{ webhookId: string; result: WebhookTestResult } | null>(null)
   const [timelineRefresh, setTimelineRefresh] = useState(0)
-  const [selectedDeliveryId, setSelectedDeliveryId] = useState<string | null>(null)
 
   const supported = connection.capabilities.supportsWebhook
   const load = useCallback(async () => {
@@ -76,9 +75,8 @@ export function ConnectionWebhooks({ connection }: { connection: Connection }) {
     try {
       const result = await testWebhook(webhook.id, payload)
       setTestResult({ webhookId: webhook.id, result })
-      setSelectedDeliveryId(result.deliveryId)
       setTimelineRefresh((current) => current + 1)
-      setNotice(result.ok ? 'Prueba enviada correctamente. El delivery quedó seleccionado en Actividad.' : 'La prueba terminó con un error. Revisá el delivery registrado.')
+      setNotice(result.ok ? 'Prueba enviada correctamente. La actividad fue actualizada.' : 'La prueba terminó con un error. Revisá la actividad registrada.')
       setWebhookToTest(null)
       await load()
     } catch (reason) {
@@ -107,6 +105,6 @@ export function ConnectionWebhooks({ connection }: { connection: Connection }) {
     {!isLoading && !error && items.length > 0 ? <div className="connection-webhooks-list">{items.map((webhook) => <article key={webhook.id} className="connection-webhook-card"><div className="connection-webhook-heading"><div><div><h4>{webhook.name}</h4><span className={webhook.enabled ? 'webhook-enabled is-active' : 'webhook-enabled'}>{webhook.enabled ? 'Activo' : 'Inactivo'}</span></div><p>{healthLabel(webhook)}</p></div><div className="connection-webhook-actions"><button type="button" className="client-button-secondary" onClick={() => { setIsCreating(false); setEditing(webhook) }}><Pencil size={15} aria-hidden="true" /> Editar</button><button type="button" className="client-button-secondary" onClick={() => void toggle(webhook)} disabled={running === `toggle-${webhook.id}`}><Power size={15} aria-hidden="true" /> {webhook.enabled ? 'Desactivar' : 'Activar'}</button></div></div><dl className="connection-webhook-summary"><div><dt>Endpoint</dt><dd><code>{webhook.url}</code></dd></div><div><dt>Autenticación</dt><dd>{authLabel(webhook)}</dd></div><div><dt>Eventos</dt><dd>{eventLabel(webhook.eventFilters)}</dd></div><div><dt>Última entrega</dt><dd>{dateTime(webhook.lastUsedAt)}</dd></div></dl><div className="connection-webhook-card-actions"><button type="button" className="client-button-primary" disabled={!webhook.enabled || running === `test-${webhook.id}`} onClick={() => setWebhookToTest(webhook)}><FlaskConical size={15} aria-hidden="true" /> Probar webhook</button><button type="button" className="client-button-danger" disabled={running === `delete-${webhook.id}`} onClick={() => setWebhookToDelete(webhook)}><Trash2 size={15} aria-hidden="true" /> Eliminar</button></div>{testResult?.webhookId === webhook.id ? <div className={`connection-webhook-test-result ${testResult.result.ok ? 'is-success' : 'is-error'}`} role="status">{testResult.result.ok ? <CheckCircle2 size={18} aria-hidden="true" /> : <CircleAlert size={18} aria-hidden="true" />}<span>{testResult.result.ok ? 'Entrega de prueba exitosa' : 'La entrega de prueba falló'}{testResult.result.status ? ` · HTTP ${testResult.result.status}` : ''}{testResult.result.latencyMs !== null ? ` · ${Math.round(testResult.result.latencyMs)} ms` : ''}{testResult.result.error ? ` · ${testResult.result.error}` : ''}</span></div> : null}</article>)}</div> : null}
     {webhookToTest ? <WebhookTestPanel webhooks={items} selected={webhookToTest} isSubmitting={running === `test-${webhookToTest.id}`} onSelect={setWebhookToTest} onCancel={() => setWebhookToTest(null)} onSubmit={runTest} /> : null}
     <ConfirmDialog isOpen={Boolean(webhookToDelete)} title="¿Eliminar este webhook?" description="Dejará de recibir nuevas entregas. El historial técnico se conserva según la retención configurada." confirmLabel="Eliminar webhook" submittingLabel="Eliminando…" isSubmitting={running === `delete-${webhookToDelete?.id}`} onCancel={() => setWebhookToDelete(null)} onConfirm={() => void remove()} />
-    <WebhookActivityTimeline connectionId={connection.id} refreshToken={timelineRefresh} selectedDeliveryId={selectedDeliveryId} />
+    <ConnectionWebhookActivity connectionId={connection.id} refreshToken={timelineRefresh} />
   </section>
 }

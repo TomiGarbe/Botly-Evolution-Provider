@@ -14,6 +14,8 @@ from app.services.connection_registry import ConnectionRegistry
 from app.services.connections import ConnectionService, UnsupportedConnectionProviderError
 from app.core.config import Settings
 from app.services.credential_manager import CredentialManager, ProviderAccountReference
+from app.services.core_channel_credentials import CoreChannelCredentialStore
+from app.services.core_control_plane import CoreBinding, CoreChannel
 from app.services.gateway_settings import GatewaySettingsService
 from app.services.instagram_oauth import (
     InstagramAccount,
@@ -60,12 +62,39 @@ def _connection_service(monkeypatch, tmp_path):
             environment="test",
         ),
     )
+    monkeypatch.setattr(
+        "app.services.core_channel_credentials.get_settings",
+        lambda: SimpleNamespace(
+            core_channel_credentials_path=str(tmp_path / "core-channel-credentials.json"),
+            core_channel_credentials_encryption_key="core-channel-test-key",
+            gateway_api_key="gateway-key",
+            environment="test",
+        ),
+    )
     settings = GatewaySettingsService(tmp_path / "gateway_settings.json")
     settings.update_channels({"instagram": True})
     registry = ConnectionRegistry(tmp_path / "connections.json")
     client = ClientService(registry).create_client("Tenant A")
-    service = ConnectionService(_Runtime(), registry, settings, CredentialManager())
+    service = ConnectionService(_Runtime(), registry, settings, CredentialManager(), CoreChannelCredentialStore(tmp_path / "core-channel-credentials.json"))
     connection = service.create_connection(client_id=client.id, channel="instagram", provider="meta")
+    class _ControlPlane:
+        async def discover_channels(self, *, gateway_client_id, channel_type):
+            assert gateway_client_id == client.id
+            assert channel_type == "instagram"
+            return [CoreChannel(id="core-channel-a", name="Botly Instagram", channel_type="instagram", status="active")]
+
+        async def bind(self, *, gateway_client_id, gateway_connection_id, core_channel_id, channel_type):
+            assert gateway_client_id == client.id
+            assert gateway_connection_id == connection.id
+            assert core_channel_id == "core-channel-a"
+            assert channel_type == "instagram"
+            return CoreBinding(
+                id="core-binding-a",
+                channel=CoreChannel(id="core-channel-a", name="Botly Instagram", channel_type="instagram", status="active"),
+                dispatch_credential="core-channel-credential",
+            )
+
+    monkeypatch.setattr(connections_router, "get_core_control_plane_client", lambda: _ControlPlane())
     return service, registry, client, connection
 
 
@@ -396,11 +425,52 @@ def test_callback_uses_state_tenant_binding_not_client_supplied_ids(monkeypatch,
     assert result["ok"] is True
     assert result["connection"]["client_id"] == client.id
     assert result["connection"]["provider_account"]["providerAccountId"] == "17841400000000000"
+    assert result["connection"]["core_channel"] == {"channelId": "core-channel-a", "name": "Botly Instagram", "configured": True}
+    assert result["connection"]["status"]["state"] == "connected"
 
     mismatched = states.create(InstagramOAuthIntent(connection.id, "tenant-b", "actor-b"))
     with pytest.raises(Exception) as exc:
         asyncio.run(connections_router.instagram_oauth_callback(state=mismatched, code="code", error=None, error_description=None))
     assert getattr(exc.value, "status_code", None) == 403
+
+
+def test_callback_requires_exactly_one_active_core_channel(monkeypatch, tmp_path) -> None:
+    service, _, client, connection = _connection_service(monkeypatch, tmp_path)
+    states = InstagramOAuthStateStore(tmp_path / "ambiguous-core-channel-states.json")
+    state = states.create(InstagramOAuthIntent(connection.id, client.id, "actor-a"))
+
+    class _OAuth:
+        def requested_scopes(self):
+            return ("instagram_business_basic",)
+
+        async def exchange_code(self, _code):
+            return InstagramOAuthToken("callback-token", None, ("instagram_business_basic",))
+
+        async def discover_account(self, _token):
+            return InstagramAccount("17841400000000000", account_type="BUSINESS")
+
+    class _AmbiguousControlPlane:
+        async def discover_channels(self, **_kwargs):
+            return [
+                CoreChannel(id="core-a", name="Instagram A", channel_type="instagram", status="active"),
+                CoreChannel(id="core-b", name="Instagram B", channel_type="instagram", status="active"),
+            ]
+
+        async def bind(self, **_kwargs):
+            raise AssertionError("an ambiguous Core channel set must never be bound")
+
+    monkeypatch.setattr(connections_router, "_service", service)
+    monkeypatch.setattr(connections_router, "_instagram_oauth_states", states)
+    monkeypatch.setattr(connections_router, "_instagram_oauth", _OAuth())
+    monkeypatch.setattr(connections_router, "get_credential_manager", lambda: service._credentials)
+    monkeypatch.setattr(connections_router, "get_core_control_plane_client", lambda: _AmbiguousControlPlane())
+
+    with pytest.raises(Exception) as exc:
+        asyncio.run(connections_router.instagram_oauth_callback(state=state, code="code", error=None, error_description=None))
+
+    assert getattr(exc.value, "status_code", None) == 409
+    assert service.instagram_core_channel_binding(connection.id) is None
+    assert asyncio.run(service.get_connection(connection.id)).status.state == "connecting"
 
 
 def test_authorize_route_requires_a_meta_instagram_connection_and_creates_bound_state(monkeypatch, tmp_path) -> None:

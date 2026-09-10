@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import time
+from unittest.mock import AsyncMock
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -112,6 +113,11 @@ def test_meta_webhook_accepts_signed_message_status_and_error(monkeypatch, tmp_p
     settings = _settings()
     store_path = tmp_path / "credentials.json"
     monkeypatch.setattr(meta_webhook, "get_settings", lambda: settings)
+    # This contract test verifies the synchronous Meta acknowledgement.  A
+    # configured local webhook target must not turn it into a real network
+    # delivery or make its result depend on developer-machine state.
+    monkeypatch.setattr(meta_webhook, "_forward_to_instance_webhooks", AsyncMock())
+    monkeypatch.setattr(meta_webhook, "_process_cloud_event", AsyncMock(return_value="queued"))
     monkeypatch.setattr(
         credential_manager,
         "get_settings",
