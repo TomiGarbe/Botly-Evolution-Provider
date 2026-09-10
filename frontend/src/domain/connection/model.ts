@@ -47,10 +47,10 @@ export interface Connection {
     metadata: { username?: string; displayName?: string; accountType?: string }
   } | null
   coreChannel: { channelId: string; name: string | null; configured: boolean } | null
-  readiness: InstagramReadiness | null
+  readiness: ConnectionReadiness | null
 }
 
-export interface InstagramReadiness {
+export interface ConnectionReadiness {
   state: string
   ready: boolean
   configured?: boolean
@@ -58,9 +58,15 @@ export interface InstagramReadiness {
   accountDiscovered?: boolean
   credentialValid?: boolean
   requiredScopesPresent?: boolean
+  coreBindingPresent?: boolean
+  coreCredentialValid?: boolean
+  coreDeliveryReady?: boolean
   missingScopes?: string[]
   tokenExpiry?: string
 }
+
+/** Compatibility alias while provider-specific API routes are retired gradually. */
+export type InstagramReadiness = ConnectionReadiness
 
 export interface CreateConnectionInput {
   clientId: string

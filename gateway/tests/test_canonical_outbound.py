@@ -37,9 +37,9 @@ class _Registry:
 
 
 class _AttemptStore:
-    def create(self, **kwargs):
+    def create_or_get_by_idempotency(self, **kwargs):
         self.created = kwargs
-        return {"id": "attempt-1"}
+        return {"id": "attempt-1"}, True
 
     def finish_success(self, attempt_id, result):
         return {"id": attempt_id, "providerMessageId": result["key"]["id"]}

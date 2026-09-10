@@ -109,6 +109,24 @@ export interface WebhookDeliveryMetrics {
   averageResponseTimeMs: number
 }
 
+export interface ConnectionWebhookActivity {
+  id: string
+  timestamp: number
+  direction: 'inbound' | 'outbound'
+  source: 'provider' | 'gateway' | string
+  destination: 'gateway' | 'core' | 'external_webhook' | string
+  eventType: string | null
+  status: string
+  httpStatus: number | null
+  durationMs: number | null
+  eventId: string | null
+  providerMessageId: string | null
+  requestId: string | null
+  correlationId: string | null
+  error: string | null
+  attemptCount: number
+}
+
 export interface ConnectionDiagnosticCheck {
   code: string
   label: string
@@ -218,6 +236,20 @@ export async function verifyConnectionWebhookConfiguration(connectionId: string)
 export async function listConnectionWebhookDeliveries(connectionId: string): Promise<{ items: WebhookDelivery[]; metrics: WebhookDeliveryMetrics }> {
   const payload = await gatewayRequest<{ items: WebhookDelivery[]; metrics: WebhookDeliveryMetrics }>(`/connections/${encodeURIComponent(connectionId)}/webhook/deliveries?limit=100`)
   return { items: Array.isArray(payload.items) ? payload.items : [], metrics: payload.metrics }
+}
+
+export async function listConnectionWebhookActivity(connectionId: string): Promise<ConnectionWebhookActivity[]> {
+  const payload = await gatewayRequest<{ items: Array<{
+    id: string; timestamp: number; direction: 'inbound' | 'outbound'; source: string; destination: string; event_type: string | null; status: string
+    http_status: number | null; duration_ms: number | null; event_id: string | null; provider_message_id: string | null
+    request_id: string | null; correlation_id: string | null; error: string | null; attempt_count: number
+  }> }>(`/connections/${encodeURIComponent(connectionId)}/webhook/activity?limit=100`)
+  return (Array.isArray(payload.items) ? payload.items : []).map((item) => ({
+    id: item.id, timestamp: item.timestamp, direction: item.direction, source: item.source, destination: item.destination,
+    eventType: item.event_type, status: item.status, httpStatus: item.http_status, durationMs: item.duration_ms,
+    eventId: item.event_id, providerMessageId: item.provider_message_id, requestId: item.request_id,
+    correlationId: item.correlation_id, error: item.error, attemptCount: item.attempt_count,
+  }))
 }
 
 export async function getConnectionIntegrationEndpoints(connectionId: string): Promise<ConnectionIntegrationEndpoints> {
