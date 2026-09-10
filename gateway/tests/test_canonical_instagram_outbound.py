@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
@@ -11,13 +12,22 @@ from fastapi.testclient import TestClient
 
 from app.domain import ChannelId, ChannelStatus, MethodId, ProvisionedChannel, RuntimeId
 from app.models.canonical_outbound import CanonicalOutboundMessage
-from app.platforms.meta import MetaPlatform, MetaPlatformError
+from app.platforms.instagram import InstagramGraphClient, InstagramGraphError
+from app.platforms.meta import MetaPlatformError
 from app.providers.instagram import MetaInstagramProvider
 from app.providers.registry import ProviderRegistry
 from app.routers import canonical_outbound
 from app.services.canonical_outbound import CanonicalOutboundError, CanonicalOutboundService
 from app.services.connections import UnsupportedConnectionProviderError
 from app.services.outbound_provider_attempts import OutboundProviderAttemptStore
+
+
+def _instagram_settings():
+    return SimpleNamespace(
+        instagram_graph_api_url="https://graph.instagram.com",
+        instagram_graph_api_version="v23.0",
+        meta_signup_timeout_seconds=30,
+    )
 
 
 def _message(channel_id: str, *, recipient: str = "instagram:opaque-user/ABC-123", idempotency_key: str = "core:instagram:one") -> CanonicalOutboundMessage:
@@ -157,8 +167,8 @@ def test_canonical_instagram_uses_provider_graph_adapter_and_maps_message_id(tmp
         requests.append(request)
         return httpx.Response(200, json={"recipient_id": "opaque-recipient", "message_id": "ig-test-message-id"})
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://graph.facebook.com/v23.0")
-    adapter = MetaInstagramProvider(platform=MetaPlatform(client=client))
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://graph.instagram.com")
+    adapter = MetaInstagramProvider(transport=InstagramGraphClient(client=client, settings_factory=_instagram_settings))
 
     class _AdapterBridge(_InstagramConnectionService):
         async def send_instagram_text(self, *, connection_id: str, external_id: str, text: str, provider: MetaInstagramProvider):
@@ -192,8 +202,11 @@ def test_canonical_instagram_uses_provider_graph_adapter_and_maps_message_id(tmp
     assert result["providerMessageId"] == "ig-test-message-id"
     assert len(requests) == 1
     assert requests[0].method == "POST"
+    assert requests[0].url.host == "graph.instagram.com"
     assert requests[0].url.path == "/v23.0/page-node-1/messages"
-    assert requests[0].url.params["access_token"] == "test-token"
+    assert requests[0].headers["Authorization"] == "Bearer test-token"
+    assert "access_token" not in requests[0].url.params
+    assert "graph.facebook.com" not in str(requests[0].url)
     assert json.loads(requests[0].content) == {
         "recipient": {"id": "opaque-recipient"},
         "message": {"text": "Hola desde Botly"},
@@ -231,6 +244,21 @@ def test_canonical_instagram_maps_meta_errors_without_exposing_details(tmp_path,
     assert raised.value.status_code == status_code
     assert raised.value.code == "provider_delivery_failed"
     assert "provider detail" not in str(raised.value)
+
+
+def test_canonical_instagram_preserves_instagram_transport_credential_errors(tmp_path) -> None:
+    channel_id = str(uuid4())
+    connection_service = _InstagramConnectionService(
+        error=InstagramGraphError("credential rejected", status_code=401),
+    )
+
+    with pytest.raises(CanonicalOutboundError) as raised:
+        asyncio.run(_service(tmp_path, channel_id, connection_service).deliver(
+            message=_message(channel_id), authenticated_instance=None,
+        ))
+
+    assert raised.value.status_code == 401
+    assert raised.value.code == "provider_delivery_failed"
 
 
 def test_canonical_instagram_reuses_accepted_idempotency_result_without_second_send(tmp_path) -> None:

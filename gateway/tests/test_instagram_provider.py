@@ -4,12 +4,21 @@ import asyncio
 import hashlib
 import hmac
 import json
+from types import SimpleNamespace
 
 import httpx
 
 from app.domain import ChannelId, ChannelStatus, MethodId, ProvisionedChannel, RuntimeId
-from app.platforms.meta import MetaPlatform
+from app.platforms.instagram import InstagramGraphClient
 from app.providers.instagram import InstagramProvider, MetaInstagramProvider
+
+
+def _instagram_settings():
+    return SimpleNamespace(
+        instagram_graph_api_url="https://graph.instagram.com",
+        instagram_graph_api_version="v23.0",
+        meta_signup_timeout_seconds=30,
+    )
 
 
 def _instagram_channel() -> ProvisionedChannel:
@@ -113,7 +122,7 @@ def test_instagram_provider_capabilities_are_foundation_not_ready() -> None:
     assert capabilities["ready"] is False
 
 
-def test_instagram_provider_sends_text_through_meta_platform() -> None:
+def test_instagram_provider_sends_text_through_instagram_graph_with_bearer_auth() -> None:
     requests: list[httpx.Request] = []
 
     async def run() -> None:
@@ -123,9 +132,9 @@ def test_instagram_provider_sends_text_through_meta_platform() -> None:
 
         client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler),
-            base_url="https://graph.facebook.com/v23.0",
+            base_url="https://graph.instagram.com",
         )
-        provider = InstagramProvider(platform=MetaPlatform(client=client))
+        provider = InstagramProvider(transport=InstagramGraphClient(client=client, settings_factory=_instagram_settings))
         response = await provider.send_text(
             channel=_instagram_channel(),
             recipient_id="user_1",
@@ -140,8 +149,11 @@ def test_instagram_provider_sends_text_through_meta_platform() -> None:
 
     assert len(requests) == 1
     assert requests[0].method == "POST"
+    assert requests[0].url.host == "graph.instagram.com"
     assert requests[0].url.path == "/v23.0/page_1/messages"
-    assert requests[0].url.params["access_token"] == "page-token"
+    assert requests[0].headers["Authorization"] == "Bearer page-token"
+    assert "access_token" not in requests[0].url.params
+    assert "graph.facebook.com" not in str(requests[0].url)
     assert json.loads(requests[0].content) == {
         "recipient": {"id": "user_1"},
         "message": {"text": "hola"},

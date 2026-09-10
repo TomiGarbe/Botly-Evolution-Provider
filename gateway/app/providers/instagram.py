@@ -11,7 +11,7 @@ from app.domain.defaults import get_default_domain_registry
 from app.domain.models import ChannelId, MethodId, ProvisionedChannel
 from app.domain.registries import DomainRegistry, RegistryError
 from app.domain.runtime_resolver import RuntimeResolver
-from app.platforms.meta import MetaPlatform
+from app.platforms.instagram import InstagramGraphClient
 from app.providers.base import ProviderCapabilities
 
 
@@ -45,10 +45,10 @@ class MetaInstagramProvider:
         self,
         *,
         domain: DomainRegistry | None = None,
-        platform: MetaPlatform | None = None,
+        transport: InstagramGraphClient | None = None,
     ) -> None:
         self._domain = domain or get_default_domain_registry()
-        self._platform = platform or MetaPlatform()
+        self._transport = transport or InstagramGraphClient()
         self._runtime_resolver = RuntimeResolver(self._domain)
 
     def validate_payload(self, payload: dict[str, Any]) -> bool:
@@ -107,14 +107,11 @@ class MetaInstagramProvider:
             raise ValueError("channel metadata graphSendNodeId or sourceExternalId is required")
 
         message = self._build_send_message(request)
-        response = await self._platform.request(
-            "POST",
-            f"/{graph_node_id}/messages",
-            params={"access_token": request.access_token},
-            json={
-                "recipient": {"id": request.recipient_id},
-                "message": message,
-            },
+        response = await self._transport.send_message(
+            instagram_account_id=graph_node_id,
+            access_token=request.access_token,
+            recipient_id=request.recipient_id,
+            message=message,
         )
         return response if isinstance(response, dict) else {"ok": True}
 

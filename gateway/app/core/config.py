@@ -194,6 +194,8 @@ class Settings(BaseSettings):
     instagram_oauth_authorize_url: str = "https://www.instagram.com/oauth/authorize"
     instagram_oauth_token_url: str = "https://api.instagram.com/oauth/access_token"
     instagram_graph_api_url: str = "https://graph.instagram.com"
+    # Keep Instagram delivery versioning separate from Meta/WhatsApp Graph.
+    instagram_graph_api_version: str = "v23.0"
 
     model_config = SettingsConfigDict(
         # En Docker las variables llegan por environment: en el compose.
